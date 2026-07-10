@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#14231a">
+  <meta name="description" content="MeetingMind Local chuyển file ghi âm thành biên bản ngay trong trình duyệt, không cần API trả phí.">
+  <title>MeetingMind Local — Biên bản AI trong trình duyệt</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="MeetingMind Local">
+      <span class="brand-mark">M</span>
+      <span><b>MeetingMind</b><small>LOCAL AI</small></span>
+    </a>
+    <div class="top-actions">
+      <span class="privacy-pill"><i></i> Xử lý trên thiết bị</span>
+      <button class="library-button" id="libraryButton" type="button">▤ Thư viện <span id="libraryCount">0</span></button>
+      <button class="icon-button" id="infoButton" type="button" aria-label="Thông tin">?</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="landing" id="landingView">
+      <div class="intro">
+        <span class="kicker">Không API · Không phí theo phút</span>
+        <h1>Biến bản ghi âm thành <em>công việc rõ ràng.</em></h1>
+        <p class="lead">AI tải về trình duyệt và xử lý ngay trên thiết bị của bạn. File ghi âm không được gửi tới máy chủ MeetingMind.</p>
+        <div class="benefits">
+          <span>✓ Transcript tiếng Việt</span>
+          <span>✓ Tóm tắt &amp; quyết định</span>
+          <span>✓ Việc cần làm</span>
+        </div>
+        <div class="device-card">
+          <span class="device-icon">◈</span>
+          <div><b id="deviceTitle">Đang kiểm tra thiết bị…</b><small id="deviceCopy">WebGPU giúp AI chạy nhanh hơn trong trình duyệt.</small></div>
+        </div>
+      </div>
+
+      <section class="upload-card" aria-labelledby="uploadTitle">
+        <div class="upload-head">
+          <div><h2 id="uploadTitle">Thêm bản ghi âm</h2><p>Chọn file từ Voice Memos hoặc ứng dụng Tệp.</p></div>
+          <span class="local-badge">100% LOCAL</span>
+        </div>
+        <label class="dropzone" id="dropzone">
+          <input id="audioInput" type="file" accept="audio/*,.m4a,.mp3,.wav,.mp4,.aac,.caf">
+          <span class="upload-icon">↑</span>
+          <strong>Kéo thả hoặc bấm để chọn file</strong>
+          <small>M4A · MP3 · WAV · MP4 · AAC · CAF</small>
+        </label>
+        <button class="record-button" id="recordButton" type="button"><i></i><span id="recordLabel">Ghi âm trực tiếp bằng micro</span><time id="recordTime">00:00</time></button>
+        <div class="file-card" id="fileCard" hidden>
+          <span class="music-icon">♫</span>
+          <div class="file-copy"><b id="fileName"></b><small id="fileMeta"></small></div>
+          <button id="removeFile" type="button" aria-label="Bỏ file">×</button>
+          <audio id="audioPlayer" controls preload="metadata"></audio>
+        </div>
+        <details class="generation-settings" open>
+          <summary>Tùy chọn tạo biên bản <span>Custom generation</span></summary>
+          <div class="settings-grid">
+            <label>Ngôn ngữ<select id="languageSelect"><option value="vi" selected>Tiếng Việt</option><option value="auto">Tự động nhận diện</option><option value="en">English</option><option value="zh">中文</option><option value="ja">日本語</option><option value="ko">한국어</option></select></label>
+            <label>Chất lượng<select id="qualitySelect"><option value="tiny">Nhanh — điện thoại</option><option value="base" selected>Cân bằng</option><option value="small">Chính xác — máy mạnh</option></select></label>
+            <label>Mẫu biên bản<select id="templateSelect"><option value="meeting">Biên bản cuộc họp</option><option value="executive">Tóm tắt điều hành</option><option value="project">Báo cáo dự án</option><option value="sales">Cuộc gọi bán hàng</option><option value="interview">Phỏng vấn</option><option value="lecture">Bài giảng / đào tạo</option><option value="brainstorm">Brainstorm ý tưởng</option><option value="custom">Mẫu tùy chỉnh</option></select></label>
+            <label>Từ vựng riêng<input id="vocabularyInput" placeholder="Tên riêng, dự án, thuật ngữ…"></label>
+          </div>
+          <label class="wide-field">Ghi chú định hướng<textarea id="contextInput" rows="2" placeholder="Ví dụ: tập trung vào tiến độ, rủi ro và trách nhiệm từng bộ phận"></textarea></label>
+          <label class="image-field">＋ Thêm hình ảnh / tài liệu tham chiếu<input id="imageInput" type="file" accept="image/*" multiple><span id="imageCount">Chưa có ảnh</span></label>
+        </details>
+        <button class="primary-button" id="startButton" type="button" disabled>Phân tích bằng AI trên thiết bị →</button>
+        <p class="first-run-note">Lần đầu cần Internet để tải mô hình AI. Những lần sau trình duyệt sử dụng bản đã lưu trong bộ nhớ đệm.</p>
+      </section>
+    </section>
+
+    <section class="processing" id="processingView" hidden aria-live="polite">
+      <div class="processing-card">
+        <div class="progress-ring" id="progressRing"><span id="progressNumber">0%</span></div>
+        <span class="kicker">AI đang chạy trên thiết bị</span>
+        <h2 id="progressTitle">Đang chuẩn bị âm thanh…</h2>
+        <p id="progressCopy">Không đóng tab trong khi xử lý.</p>
+        <div class="progress-track"><span id="progressBar"></span></div>
+        <div class="stage-list">
+          <span id="stageAudio">1. Đọc âm thanh</span>
+          <span id="stageTranscript">2. Tạo transcript</span>
+          <span id="stageNotes">3. Viết biên bản</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="results" id="resultsView" hidden>
+      <div class="result-head">
+        <div>
+          <span class="kicker">Biên bản đã hoàn tất</span>
+          <input id="meetingTitle" class="meeting-title" value="Cuộc họp mới" aria-label="Tên cuộc họp">
+          <p class="meeting-meta" id="meetingMeta"></p>
+        </div>
+        <div class="result-actions">
+          <button class="secondary-button" id="newButton" type="button">＋ Cuộc họp mới</button>
+          <button class="primary-button compact" id="exportButton" type="button">↓ Chia sẻ &amp; xuất</button>
+        </div>
+      </div>
+
+      <div class="playback-bar">
+        <audio id="resultAudio" controls></audio>
+        <button class="highlight-button" id="highlightButton" type="button">⚑ Đánh dấu mốc hiện tại</button>
+        <span id="highlightCount">0 highlights</span>
+      </div>
+
+      <div class="result-grid">
+        <section class="content-panel">
+          <nav class="tabs" aria-label="Nội dung biên bản">
+            <button class="tab active" data-tab="summary" type="button">Tóm tắt</button>
+            <button class="tab" data-tab="transcript" type="button">Transcript</button>
+            <button class="tab" data-tab="decisions" type="button">Quyết định</button>
+            <button class="tab" data-tab="actions" type="button">Việc cần làm</button>
+            <button class="tab" data-tab="mindmap" type="button">Mind map</button>
+            <button class="tab" data-tab="ask" type="button">Hỏi AI</button>
+          </nav>
+          <div class="tab-content active" id="summaryPanel"></div>
+          <div class="tab-content" id="transcriptPanel"></div>
+          <div class="tab-content" id="decisionsPanel"></div>
+          <div class="tab-content" id="actionsPanel"></div>
+          <div class="tab-content" id="mindmapPanel"></div>
+          <div class="tab-content" id="askPanel">
+            <div class="ask-hero"><span>ASK MEETINGMIND</span><h3>Hỏi bất kỳ điều gì về bản ghi</h3><p>Câu trả lời dựa trên transcript và có dẫn mốc thời gian.</p></div>
+            <div class="ask-history" id="askHistory"></div>
+            <form class="ask-form" id="askForm"><input id="askInput" placeholder="Ai phụ trách việc tiếp theo?" autocomplete="off"><button type="submit">→</button></form>
+          </div>
+        </section>
+
+        <aside class="insight-column">
+          <section class="insight-card">
+            <div class="card-label">TỔNG QUAN</div>
+            <div class="stats">
+              <div><b id="wordCount">0</b><span>Từ</span></div>
+              <div><b id="decisionCount">0</b><span>Quyết định</span></div>
+              <div><b id="actionCount">0</b><span>Đầu việc</span></div>
+            </div>
+          </section>
+          <section class="insight-card local-info">
+            <div class="card-label">QUYỀN RIÊNG TƯ</div>
+            <h3>File vẫn ở trên thiết bị</h3>
+            <p>Website chỉ tải mã và mô hình AI. Âm thanh được giải mã, phiên âm và tóm tắt trong trình duyệt.</p>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="infoDialog">
+    <div class="dialog-head"><div><h2>AI chạy như thế nào?</h2><p>Không dùng OpenAI API hoặc máy chủ riêng.</p></div><button type="button" data-close-dialog>×</button></div>
+    <div class="dialog-body">
+      <ol class="flow-list">
+        <li><b>Trình duyệt đọc file</b><span>Web Audio chuyển bản ghi thành âm thanh mono 16 kHz.</span></li>
+        <li><b>Whisper tạo transcript</b><span>Mô hình được tải từ Hugging Face và chạy bằng WebGPU/WASM.</span></li>
+        <li><b>Qwen viết biên bản</b><span>Mô hình ngôn ngữ nhỏ phân tích transcript ngay trên thiết bị.</span></li>
+      </ol>
+      <div class="warning-box"><b>Giới hạn thực tế</b><p>Máy yếu hoặc điện thoại cũ có thể xử lý chậm. Chế độ AI trong trình duyệt chưa tách người nói chính xác như dịch vụ đám mây chuyên dụng.</p></div>
+    </div>
+    <div class="dialog-actions"><button class="primary-button compact" type="button" data-close-dialog>Đã hiểu</button></div>
+  </dialog>
+
+  <dialog id="errorDialog">
+    <div class="dialog-head"><div><h2>Chưa thể xử lý</h2><p id="errorMessage"></p></div><button type="button" data-close-dialog>×</button></div>
+    <div class="dialog-body"><p class="error-help" id="errorHelp"></p></div>
+    <div class="dialog-actions"><button class="primary-button compact" type="button" data-close-dialog>Đóng</button></div>
+  </dialog>
+
+  <dialog id="exportDialog">
+    <div class="dialog-head"><div><h2>Chia sẻ &amp; xuất</h2><p>Chọn nội dung và định dạng phù hợp.</p></div><button type="button" data-close-dialog>×</button></div>
+    <div class="dialog-body export-grid">
+      <button type="button" data-export="md"><b>Markdown</b><span>Tóm tắt + transcript</span></button>
+      <button type="button" data-export="txt"><b>TXT</b><span>Văn bản thuần</span></button>
+      <button type="button" data-export="srt"><b>SRT</b><span>Phụ đề có timestamp</span></button>
+      <button type="button" data-export="json"><b>Project JSON</b><span>Sao lưu và nhập lại</span></button>
+      <button type="button" data-export="pdf"><b>PDF</b><span>In hoặc lưu PDF</span></button>
+      <button type="button" data-export="share"><b>Chia sẻ</b><span>Dùng bảng chia sẻ thiết bị</span></button>
+    </div>
+  </dialog>
+
+  <dialog id="libraryDialog">
+    <div class="dialog-head"><div><h2>Thư viện trên thiết bị</h2><p>Biên bản được lưu cục bộ trong trình duyệt này.</p></div><button type="button" data-close-dialog>×</button></div>
+    <div class="dialog-body"><div class="library-list" id="libraryList"></div><label class="import-label">＋ Nhập project JSON<input id="importInput" type="file" accept="application/json,.json"></label></div>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
