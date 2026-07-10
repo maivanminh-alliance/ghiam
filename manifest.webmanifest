@@ -1,0 +1,11 @@
+{
+  "name": "MeetingMind Local",
+  "short_name": "MeetingMind",
+  "description": "Chuyển bản ghi âm thành biên bản bằng AI chạy trong trình duyệt.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f6f1",
+  "theme_color": "#14231a",
+  "icons": []
+}
