@@ -80,14 +80,22 @@ async function startAnalysis() {
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   try {
     const isLongM4a = /\.(m4a|mp4)$/iu.test(state.file.name);
+    const duration = state.duration || Number($('#audioPlayer').duration) || 0;
+    let quality = $('#qualitySelect').value;
+    if (duration >= 45 * 60 && quality !== 'tiny') {
+      quality = 'tiny';
+      $('#qualitySelect').value = 'tiny';
+      setProgress(4, 'Đã bật chế độ an toàn bộ nhớ', 'File trên 45 phút được tự chuyển sang mô hình Nhanh để tránh giật, lag hoặc văng tab.', 1);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
     if (isLongM4a) {
-      setProgress(5, 'Đang chuẩn bị file M4A…', 'File dài sẽ được giải mã theo từng phần để tiết kiệm bộ nhớ.', 1);
+      setProgress(5, 'Đang chuẩn bị file M4A…', 'Mỗi phần 10 phút sẽ được giải mã, phiên âm rồi giải phóng khỏi RAM.', 1);
       const fileBuffer = await state.file.arrayBuffer();
-      createWorker().postMessage({ type: 'transcribe', fileBuffer, filename: state.file.name, quality: $('#qualitySelect').value, language: $('#languageSelect').value, webgpu: state.webgpu }, [fileBuffer]);
+      createWorker().postMessage({ type: 'transcribe', fileBuffer, filename: state.file.name, quality, language: $('#languageSelect').value, webgpu: state.webgpu }, [fileBuffer]);
     } else {
       const audio = await decodeAudio(state.file);
-      setProgress(10, 'Đang tải mô hình phiên âm…', `Chế độ ${modelNames[$('#qualitySelect').value]}. Lần đầu có thể mất vài phút.`, 2);
-      createWorker().postMessage({ type: 'transcribe', audio, filename: state.file.name, quality: $('#qualitySelect').value, language: $('#languageSelect').value, webgpu: state.webgpu }, [audio.buffer]);
+      setProgress(10, 'Đang tải mô hình phiên âm…', `Chế độ ${modelNames[quality]}. Lần đầu có thể mất vài phút.`, 2);
+      createWorker().postMessage({ type: 'transcribe', audio, filename: state.file.name, quality, language: $('#languageSelect').value, webgpu: state.webgpu }, [audio.buffer]);
     }
   } catch (error) { handleFailure(error); }
 }
@@ -105,7 +113,7 @@ function handleWorkerMessage(event) {
   const message = event.data || {};
   if (message.type === 'progress') {
     if (message.phase === 'asr-download') setProgress(10 + message.value * .28, 'Đang tải mô hình phiên âm…', message.detail || 'Mô hình được lưu trong bộ nhớ đệm.', 2);
-    if (message.phase === 'audio-decode') setProgress(5 + message.value * .05, 'Đang giải mã file ghi âm theo từng phần…', message.detail || 'Đang chuẩn bị âm thanh 16 kHz cho AI.', 1);
+    if (message.phase === 'audio-decode') setProgress(35 + message.value * .32, 'Đang giải mã và phiên âm cuốn chiếu…', message.detail || 'Đang chuẩn bị âm thanh 16 kHz cho AI.', 2);
     if (message.phase === 'asr-run') setProgress(40 + message.value * .28, 'Đang chuyển giọng nói thành văn bản…', message.detail || 'Whisper đang nghe và tạo mốc thời gian.', 2);
     if (message.phase === 'llm-download') setProgress(70 + message.value * .18, 'Đang tải mô hình viết biên bản…', message.detail || 'Chỉ cần tải một lần trên thiết bị này.', 3);
     if (message.phase === 'llm-run') setProgress(90 + message.value * .08, 'Đang phân tích toàn bộ cuộc hội thoại…', message.detail || 'AI đang trích xuất quyết định, rủi ro và đầu việc.', 3);

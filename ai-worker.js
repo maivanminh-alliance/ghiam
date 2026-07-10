@@ -67,17 +67,19 @@ function audioSpecificConfig(mp4File, trackId) {
   return descriptor ? new Uint8Array(descriptor) : undefined;
 }
 
-async function decodeM4a(fileBuffer) {
+async function decodeM4a(fileBuffer, onSegment) {
   if (typeof AudioDecoder === 'undefined' || typeof EncodedAudioChunk === 'undefined') {
     throw new Error('Trình duyệt này chưa hỗ trợ giải mã M4A dài. Hãy dùng Chrome hoặc Edge bản mới nhất.');
   }
   const mp4File = createMp4File();
   const targetRate = 16000;
   const segmentSize = targetRate * 10 * 60;
-  const segments = [];
   let current = new Float32Array(segmentSize);
   let currentOffset = 0;
   let processedSamples = 0;
+  let segmentIndex = 0;
+  let totalSegments = 1;
+  const readySegments = [];
   let track;
   let decoder;
   let settled = false;
@@ -90,10 +92,18 @@ async function decodeM4a(fileBuffer) {
       currentOffset += amount;
       sourceOffset += amount;
       if (currentOffset === current.length) {
-        segments.push(current);
+        readySegments.push(current);
         current = new Float32Array(segmentSize);
         currentOffset = 0;
       }
+    }
+  };
+
+  const drainSegments = async () => {
+    while (readySegments.length) {
+      const audio = readySegments.shift();
+      await onSegment(audio, segmentIndex, totalSegments);
+      segmentIndex += 1;
     }
   };
 
@@ -108,6 +118,7 @@ async function decodeM4a(fileBuffer) {
       try {
         track = info.audioTracks?.[0];
         if (!track) throw new Error('Không tìm thấy rãnh âm thanh trong file M4A.');
+        totalSegments = Math.max(1, Math.ceil((track.duration / track.timescale) / (segmentSize / targetRate)));
         const config = {
           codec: track.codec,
           sampleRate: track.audio.sample_rate,
@@ -141,13 +152,17 @@ async function decodeM4a(fileBuffer) {
           }));
         }
       } catch (error) { fail(error); return; }
-      decoder.flush().then(() => {
+      decoder.flush().then(async () => {
         processedSamples += samples.length;
         const percent = processedSamples / Math.max(1, track.nb_samples) * 100;
         progress('audio-decode', percent, `Đang giải mã âm thanh ${Math.min(100, Math.round(percent))}%…`);
-        mp4File.releaseUsedSamples(trackId, processedSamples);
+        await drainSegments();
+        mp4File.releaseUsedSamples(trackId, samples.at(-1)?.number ?? processedSamples);
         if (processedSamples >= track.nb_samples) {
-          if (currentOffset) segments.push(current.slice(0, currentOffset));
+          if (currentOffset) readySegments.push(current.slice(0, currentOffset));
+          current = null;
+          currentOffset = 0;
+          await drainSegments();
           decoder.close();
           settled = true;
           resolve();
@@ -161,8 +176,8 @@ async function decodeM4a(fileBuffer) {
     mp4File.flush();
   });
 
-  progress('audio-decode', 100, `Đã chia âm thanh thành ${segments.length} phần.`);
-  return segments;
+  progress('audio-decode', 100, `Đã xử lý cuốn chiếu ${segmentIndex}/${totalSegments} phần.`);
+  return { segmentCount: segmentIndex, totalSegments };
 }
 
 function splitPcm(audio, segmentSize = 16000 * 10 * 60) {
@@ -171,42 +186,45 @@ function splitPcm(audio, segmentSize = 16000 * 10 * 60) {
   return segments;
 }
 
+async function transcribeSegment(audio, index, totalSegments, message, transcript) {
+  const sampleRate = 16000;
+  const offsetSeconds = index * 10 * 60;
+  const endSeconds = offsetSeconds + audio.length / sampleRate;
+  const options = {
+    task: 'transcribe',
+    return_timestamps: true,
+    chunk_length_s: 30,
+    stride_length_s: 5,
+  };
+  if (message.language && message.language !== 'auto') options.language = message.language;
+  progress('asr-run', 5 + index / Math.max(1, totalSegments) * 90, `Đang phiên âm cuốn chiếu phần ${index + 1}/${totalSegments} (${formatClock(offsetSeconds)}–${formatClock(endSeconds)})…`);
+  const output = await transcriber(audio, options);
+  const chunks = output.chunks || [];
+  if (chunks.length) {
+    transcript.push(...chunks.map(chunk => {
+      const start = offsetSeconds + (Number(chunk.timestamp?.[0]) || 0);
+      const end = offsetSeconds + (Number(chunk.timestamp?.[1]) || 0);
+      return { start, end, time: formatClock(start), text: String(chunk.text || '').trim() };
+    }).filter(row => row.text));
+  } else if (String(output.text || '').trim()) {
+    transcript.push({ start: offsetSeconds, end: endSeconds, time: formatClock(offsetSeconds), text: String(output.text).trim() });
+  }
+}
+
 async function transcribe(message) {
-  let audioSegments;
+  await loadTranscriber(message.quality, message.webgpu);
+  progress('asr-run', 4, 'Mô hình đã sẵn sàng. Bắt đầu xử lý cuốn chiếu…');
+  const transcript = [];
   if (message.fileBuffer) {
     progress('audio-decode', 1, 'Đang đọc cấu trúc file M4A…');
-    audioSegments = await decodeM4a(message.fileBuffer);
+    await decodeM4a(message.fileBuffer, (audio, index, total) => transcribeSegment(audio, index, total, message, transcript));
+    message.fileBuffer = null;
   } else {
-    audioSegments = splitPcm(message.audio || new Float32Array());
-  }
-  await loadTranscriber(message.quality, message.webgpu);
-  progress('asr-run', 4, 'Mô hình đang nghe bản ghi…');
-  const sampleRate = 16000;
-  const totalSegments = Math.max(1, audioSegments.length);
-  const transcript = [];
-  for (let index = 0; index < totalSegments; index += 1) {
-    const audio = audioSegments[index];
-    audioSegments[index] = null;
-    const offsetSeconds = index * 10 * 60;
-    const endSeconds = offsetSeconds + audio.length / sampleRate;
-    const options = {
-      task: 'transcribe',
-      return_timestamps: true,
-      chunk_length_s: 30,
-      stride_length_s: 5,
-    };
-    if (message.language && message.language !== 'auto') options.language = message.language;
-    progress('asr-run', 5 + index / totalSegments * 90, `Đang nghe phần ${index + 1}/${totalSegments} (${formatClock(offsetSeconds)}–${formatClock(endSeconds)})…`);
-    const output = await transcriber(audio, options);
-    const chunks = output.chunks || [];
-    if (chunks.length) {
-      transcript.push(...chunks.map(chunk => {
-        const start = offsetSeconds + (Number(chunk.timestamp?.[0]) || 0);
-        const end = offsetSeconds + (Number(chunk.timestamp?.[1]) || 0);
-        return { start, end, time: formatClock(start), text: String(chunk.text || '').trim() };
-      }).filter(row => row.text));
-    } else if (String(output.text || '').trim()) {
-      transcript.push({ start: offsetSeconds, end: endSeconds, time: formatClock(offsetSeconds), text: String(output.text).trim() });
+    const audioSegments = splitPcm(message.audio || new Float32Array());
+    for (let index = 0; index < audioSegments.length; index += 1) {
+      const audio = audioSegments[index];
+      audioSegments[index] = null;
+      await transcribeSegment(audio, index, audioSegments.length, message, transcript);
     }
   }
   await transcriber.dispose();
