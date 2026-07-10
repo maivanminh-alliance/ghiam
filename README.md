@@ -15,6 +15,7 @@ Không mở `index.html` bằng `file://`, vì Web Worker và model AI cần web
 ## Cách hoạt động
 
 - Whisper ONNX tạo transcript tiếng Việt trong trình duyệt.
+- File M4A/MP4 dài được WebCodecs và MP4Box giải mã AAC theo từng phần 10 phút, tránh bung toàn bộ file thành hơn 1 GB trong bộ nhớ.
 - Qwen2.5 0.5B Q4 đọc lần lượt 100% transcript theo nhiều khối, hợp nhất bằng chứng rồi tạo tóm tắt, quyết định và đầu việc.
 - WebGPU được dùng khi trình duyệt hỗ trợ; WASM là chế độ dự phòng.
 - Mô hình được tải từ Hugging Face ở lần dùng đầu và lưu trong bộ nhớ đệm của từng trình duyệt.
@@ -37,5 +38,6 @@ Không mở `index.html` bằng `file://`, vì Web Worker và model AI cần web
 ## Giới hạn
 
 - Lần đầu cần tải từ vài trăm MB đến hơn 1 GB tùy chế độ.
+- Bản ghi M4A dài nên chạy bằng Chrome hoặc Edge mới; sau khi cập nhật file trên GitHub Pages, hãy tải lại trang hai lần để service worker nhận bản mới.
 - Điện thoại cũ có thể chậm hoặc thiếu bộ nhớ; nên dùng chế độ **Nhanh**.
 - Tách người nói chính xác chưa khả dụng trong bản chạy hoàn toàn trong trình duyệt.

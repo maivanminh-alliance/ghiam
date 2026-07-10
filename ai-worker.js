@@ -1,4 +1,5 @@
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+import { createFile as createMp4File } from 'https://cdn.jsdelivr.net/npm/mp4box@2.4.1/+esm';
 
 env.allowLocalModels = false;
 env.allowRemoteModels = true;
@@ -38,17 +39,156 @@ async function loadTranscriber(quality, webgpu) {
   }
 }
 
+function downsampleAudioData(audioData, targetRate = 16000) {
+  const frames = audioData.numberOfFrames;
+  const channels = audioData.numberOfChannels;
+  const mono = new Float32Array(frames);
+  for (let channel = 0; channel < channels; channel += 1) {
+    const plane = new Float32Array(frames);
+    audioData.copyTo(plane, { planeIndex: channel, format: 'f32-planar' });
+    for (let index = 0; index < frames; index += 1) mono[index] += plane[index] / channels;
+  }
+  if (audioData.sampleRate === targetRate) return mono;
+  const ratio = audioData.sampleRate / targetRate;
+  const output = new Float32Array(Math.max(1, Math.floor(frames / ratio)));
+  for (let index = 0; index < output.length; index += 1) {
+    const position = index * ratio;
+    const left = Math.floor(position);
+    const right = Math.min(frames - 1, left + 1);
+    const fraction = position - left;
+    output[index] = mono[left] * (1 - fraction) + mono[right] * fraction;
+  }
+  return output;
+}
+
+function audioSpecificConfig(mp4File, trackId) {
+  const trak = mp4File.moov?.traks?.find(item => item.tkhd?.track_id === trackId) || mp4File.moov?.traks?.[0];
+  const descriptor = trak?.mdia?.minf?.stbl?.stsd?.entries?.[0]?.esds?.esd?.descs?.[0]?.descs?.[0]?.data;
+  return descriptor ? new Uint8Array(descriptor) : undefined;
+}
+
+async function decodeM4a(fileBuffer) {
+  if (typeof AudioDecoder === 'undefined' || typeof EncodedAudioChunk === 'undefined') {
+    throw new Error('Trình duyệt này chưa hỗ trợ giải mã M4A dài. Hãy dùng Chrome hoặc Edge bản mới nhất.');
+  }
+  const mp4File = createMp4File();
+  const targetRate = 16000;
+  const segmentSize = targetRate * 10 * 60;
+  const segments = [];
+  let current = new Float32Array(segmentSize);
+  let currentOffset = 0;
+  let processedSamples = 0;
+  let track;
+  let decoder;
+  let settled = false;
+
+  const appendPcm = pcm => {
+    let sourceOffset = 0;
+    while (sourceOffset < pcm.length) {
+      const amount = Math.min(current.length - currentOffset, pcm.length - sourceOffset);
+      current.set(pcm.subarray(sourceOffset, sourceOffset + amount), currentOffset);
+      currentOffset += amount;
+      sourceOffset += amount;
+      if (currentOffset === current.length) {
+        segments.push(current);
+        current = new Float32Array(segmentSize);
+        currentOffset = 0;
+      }
+    }
+  };
+
+  await new Promise((resolve, reject) => {
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      reject(error instanceof Error ? error : new Error(String(error || 'Không thể giải mã M4A.')));
+    };
+    mp4File.onError = fail;
+    mp4File.onReady = async info => {
+      try {
+        track = info.audioTracks?.[0];
+        if (!track) throw new Error('Không tìm thấy rãnh âm thanh trong file M4A.');
+        const config = {
+          codec: track.codec,
+          sampleRate: track.audio.sample_rate,
+          numberOfChannels: track.audio.channel_count,
+          description: audioSpecificConfig(mp4File, track.id),
+        };
+        const support = await AudioDecoder.isConfigSupported(config);
+        if (!support.supported) throw new Error(`Thiết bị không giải mã được ${track.codec}.`);
+        decoder = new AudioDecoder({
+          output(audioData) {
+            try { appendPcm(downsampleAudioData(audioData, targetRate)); }
+            finally { audioData.close(); }
+          },
+          error: fail,
+        });
+        decoder.configure(support.config);
+        mp4File.setExtractionOptions(track.id, null, { nbSamples: 400, rapAlignement: false });
+        mp4File.start();
+      } catch (error) { fail(error); }
+    };
+    mp4File.onSamples = (trackId, user, samples) => {
+      if (settled || !samples.length) return;
+      mp4File.stop();
+      try {
+        for (const sample of samples) {
+          decoder.decode(new EncodedAudioChunk({
+            type: 'key',
+            timestamp: Math.round(sample.cts * 1000000 / sample.timescale),
+            duration: Math.round(sample.duration * 1000000 / sample.timescale),
+            data: sample.data,
+          }));
+        }
+      } catch (error) { fail(error); return; }
+      decoder.flush().then(() => {
+        processedSamples += samples.length;
+        const percent = processedSamples / Math.max(1, track.nb_samples) * 100;
+        progress('audio-decode', percent, `Đang giải mã âm thanh ${Math.min(100, Math.round(percent))}%…`);
+        mp4File.releaseUsedSamples(trackId, processedSamples);
+        if (processedSamples >= track.nb_samples) {
+          if (currentOffset) segments.push(current.slice(0, currentOffset));
+          decoder.close();
+          settled = true;
+          resolve();
+        } else {
+          mp4File.start();
+        }
+      }).catch(fail);
+    };
+    fileBuffer.fileStart = 0;
+    mp4File.appendBuffer(fileBuffer);
+    mp4File.flush();
+  });
+
+  progress('audio-decode', 100, `Đã chia âm thanh thành ${segments.length} phần.`);
+  return segments;
+}
+
+function splitPcm(audio, segmentSize = 16000 * 10 * 60) {
+  const segments = [];
+  for (let offset = 0; offset < audio.length; offset += segmentSize) segments.push(audio.slice(offset, Math.min(audio.length, offset + segmentSize)));
+  return segments;
+}
+
 async function transcribe(message) {
+  let audioSegments;
+  if (message.fileBuffer) {
+    progress('audio-decode', 1, 'Đang đọc cấu trúc file M4A…');
+    audioSegments = await decodeM4a(message.fileBuffer);
+  } else {
+    audioSegments = splitPcm(message.audio || new Float32Array());
+  }
   await loadTranscriber(message.quality, message.webgpu);
   progress('asr-run', 4, 'Mô hình đang nghe bản ghi…');
   const sampleRate = 16000;
-  const segmentSamples = sampleRate * 10 * 60;
-  const totalSegments = Math.max(1, Math.ceil(message.audio.length / segmentSamples));
+  const totalSegments = Math.max(1, audioSegments.length);
   const transcript = [];
   for (let index = 0; index < totalSegments; index += 1) {
-    const startSample = index * segmentSamples;
-    const endSample = Math.min(message.audio.length, startSample + segmentSamples);
-    const offsetSeconds = startSample / sampleRate;
+    const audio = audioSegments[index];
+    audioSegments[index] = null;
+    const offsetSeconds = index * 10 * 60;
+    const endSeconds = offsetSeconds + audio.length / sampleRate;
     const options = {
       task: 'transcribe',
       return_timestamps: true,
@@ -56,8 +196,8 @@ async function transcribe(message) {
       stride_length_s: 5,
     };
     if (message.language && message.language !== 'auto') options.language = message.language;
-    progress('asr-run', 5 + index / totalSegments * 90, `Đang nghe phần ${index + 1}/${totalSegments} (${formatClock(offsetSeconds)}–${formatClock(endSample / sampleRate)})…`);
-    const output = await transcriber(message.audio.slice(startSample, endSample), options);
+    progress('asr-run', 5 + index / totalSegments * 90, `Đang nghe phần ${index + 1}/${totalSegments} (${formatClock(offsetSeconds)}–${formatClock(endSeconds)})…`);
+    const output = await transcriber(audio, options);
     const chunks = output.chunks || [];
     if (chunks.length) {
       transcript.push(...chunks.map(chunk => {
@@ -66,7 +206,7 @@ async function transcribe(message) {
         return { start, end, time: formatClock(start), text: String(chunk.text || '').trim() };
       }).filter(row => row.text));
     } else if (String(output.text || '').trim()) {
-      transcript.push({ start: offsetSeconds, end: endSample / sampleRate, time: formatClock(offsetSeconds), text: String(output.text).trim() });
+      transcript.push({ start: offsetSeconds, end: endSeconds, time: formatClock(offsetSeconds), text: String(output.text).trim() });
     }
   }
   await transcriber.dispose();

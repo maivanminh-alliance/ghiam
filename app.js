@@ -76,10 +76,19 @@ async function startAnalysis() {
   if (!state.file) return;
   if (location.protocol === 'file:') return showError('Không thể chạy AI khi mở trực tiếp file HTML.', 'Hãy đưa thư mục lên GitHub Pages hoặc chạy bằng localhost.');
   showView('processing'); state.startedAt = Date.now(); state.highlights = []; state.askHistory = [];
-  setProgress(3, 'Đang đọc file ghi âm…', 'Âm thanh chỉ được giải mã trong trình duyệt.', 1);
+  setProgress(3, 'Đang đọc file ghi âm…', 'Giao diện đã nhận lệnh. Vui lòng không đóng tab.', 1);
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   try {
-    const audio = await decodeAudio(state.file); setProgress(10, 'Đang tải mô hình phiên âm…', `Chế độ ${modelNames[$('#qualitySelect').value]}. Lần đầu có thể mất vài phút.`, 2);
-    createWorker().postMessage({ type: 'transcribe', audio, quality: $('#qualitySelect').value, language: $('#languageSelect').value, webgpu: state.webgpu }, [audio.buffer]);
+    const isLongM4a = /\.(m4a|mp4)$/iu.test(state.file.name);
+    if (isLongM4a) {
+      setProgress(5, 'Đang chuẩn bị file M4A…', 'File dài sẽ được giải mã theo từng phần để tiết kiệm bộ nhớ.', 1);
+      const fileBuffer = await state.file.arrayBuffer();
+      createWorker().postMessage({ type: 'transcribe', fileBuffer, filename: state.file.name, quality: $('#qualitySelect').value, language: $('#languageSelect').value, webgpu: state.webgpu }, [fileBuffer]);
+    } else {
+      const audio = await decodeAudio(state.file);
+      setProgress(10, 'Đang tải mô hình phiên âm…', `Chế độ ${modelNames[$('#qualitySelect').value]}. Lần đầu có thể mất vài phút.`, 2);
+      createWorker().postMessage({ type: 'transcribe', audio, filename: state.file.name, quality: $('#qualitySelect').value, language: $('#languageSelect').value, webgpu: state.webgpu }, [audio.buffer]);
+    }
   } catch (error) { handleFailure(error); }
 }
 
@@ -96,6 +105,7 @@ function handleWorkerMessage(event) {
   const message = event.data || {};
   if (message.type === 'progress') {
     if (message.phase === 'asr-download') setProgress(10 + message.value * .28, 'Đang tải mô hình phiên âm…', message.detail || 'Mô hình được lưu trong bộ nhớ đệm.', 2);
+    if (message.phase === 'audio-decode') setProgress(5 + message.value * .05, 'Đang giải mã file ghi âm theo từng phần…', message.detail || 'Đang chuẩn bị âm thanh 16 kHz cho AI.', 1);
     if (message.phase === 'asr-run') setProgress(40 + message.value * .28, 'Đang chuyển giọng nói thành văn bản…', message.detail || 'Whisper đang nghe và tạo mốc thời gian.', 2);
     if (message.phase === 'llm-download') setProgress(70 + message.value * .18, 'Đang tải mô hình viết biên bản…', message.detail || 'Chỉ cần tải một lần trên thiết bị này.', 3);
     if (message.phase === 'llm-run') setProgress(90 + message.value * .08, 'Đang phân tích toàn bộ cuộc hội thoại…', message.detail || 'AI đang trích xuất quyết định, rủi ro và đầu việc.', 3);
@@ -220,7 +230,7 @@ $('#meetingTitle').addEventListener('change', () => { renderMindMap(); saveHisto
 $('#askForm').addEventListener('submit', event => { event.preventDefault(); const question = $('#askInput').value.trim(); if (!question) return; state.askHistory.push({ role: 'question', text: question }); renderAskHistory(); $('#askInput').value = ''; $('#askInput').disabled = true; $('#askForm button').disabled = true; const worker = state.worker || createWorker(); worker.postMessage({ type: 'ask', transcript: state.transcript, question, webgpu: state.webgpu }); });
 $('#libraryList').addEventListener('click', event => { const load = event.target.closest('[data-load-id]'), del = event.target.closest('[data-delete-id]'); if (load) { const item = getHistory().find(x => x.id === load.dataset.loadId); if (item) loadProject(item); } if (del) { localStorage.setItem(HISTORY_KEY, JSON.stringify(getHistory().filter(x => x.id !== del.dataset.deleteId))); updateLibrary(); } });
 $('#importInput').addEventListener('change', async event => { try { const data = JSON.parse(await event.target.files[0].text()); if (!data.transcript || !data.notes) throw new Error(); loadProject(data); } catch { showError('Project JSON không hợp lệ.'); } });
-$('#audioPlayer').addEventListener('loadedmetadata', () => { if (state.file) $('#fileMeta').textContent = `${bytes(state.file.size)} · ${humanDuration($('#audioPlayer').duration)}`; });
+$('#audioPlayer').addEventListener('loadedmetadata', () => { if (state.file) { state.duration = Number($('#audioPlayer').duration) || 0; $('#fileMeta').textContent = `${bytes(state.file.size)} · ${humanDuration(state.duration)}`; } });
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('./sw.js').catch(() => {});
 detectDevice(); updateLibrary();
