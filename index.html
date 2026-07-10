@@ -7,13 +7,13 @@
   <meta name="description" content="MeetingMind Local chuyển file ghi âm thành biên bản ngay trong trình duyệt, không cần API trả phí.">
   <title>MeetingMind Local — Biên bản AI trong trình duyệt</title>
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=4.0.0">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="./" aria-label="MeetingMind Local">
       <span class="brand-mark">M</span>
-      <span><b>MeetingMind</b><small>LOCAL AI</small></span>
+      <span><b>MeetingMind</b><small>LOCAL AI · V4</small></span>
     </a>
     <div class="top-actions">
       <span class="privacy-pill"><i></i> Xử lý trên thiết bị</span>
@@ -152,11 +152,11 @@
     <div class="dialog-head"><div><h2>AI chạy như thế nào?</h2><p>Không dùng OpenAI API hoặc máy chủ riêng.</p></div><button type="button" data-close-dialog>×</button></div>
     <div class="dialog-body">
       <ol class="flow-list">
-        <li><b>Trình duyệt đọc file</b><span>Web Audio chuyển bản ghi thành âm thanh mono 16 kHz.</span></li>
+        <li><b>Trình duyệt đọc file</b><span>MacBook xử lý M4A cuốn chiếu; iPhone chỉ xử lý cục bộ bản ghi ngắn.</span></li>
         <li><b>Whisper tạo transcript</b><span>Mô hình được tải từ Hugging Face và chạy bằng WebGPU/WASM.</span></li>
         <li><b>Qwen viết biên bản</b><span>Mô hình ngôn ngữ nhỏ phân tích transcript ngay trên thiết bị.</span></li>
       </ol>
-      <div class="warning-box"><b>Giới hạn thực tế</b><p>Máy yếu hoặc điện thoại cũ có thể xử lý chậm. Chế độ AI trong trình duyệt chưa tách người nói chính xác như dịch vụ đám mây chuyên dụng.</p></div>
+      <div class="warning-box"><b>Giới hạn thực tế</b><p>Bản ghi dài trên iPhone không thể chạy ổn định bằng HTML cục bộ do giới hạn WebKit/RAM. Hãy phân tích trên MacBook, sau đó xuất Project JSON để mở trên iPhone.</p></div>
     </div>
     <div class="dialog-actions"><button class="primary-button compact" type="button" data-close-dialog>Đã hiểu</button></div>
   </dialog>
@@ -184,6 +184,6 @@
     <div class="dialog-body"><div class="library-list" id="libraryList"></div><label class="import-label">＋ Nhập project JSON<input id="importInput" type="file" accept="application/json,.json"></label></div>
   </dialog>
 
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=4.0.0"></script>
 </body>
 </html>

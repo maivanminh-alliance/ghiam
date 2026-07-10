@@ -1,6 +1,7 @@
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
 const HISTORY_KEY = 'meetingmind_pro_history_v1';
+const APP_VERSION = '4.0.0';
 
 const state = {
   file: null, audioUrl: '', worker: null, transcript: [], notes: null, duration: 0,
@@ -14,6 +15,18 @@ function escapeHtml(value = '') { return String(value).replace(/[&<>"']/g, char 
 function bytes(size) { if (!size) return '0 B'; const units = ['B', 'KB', 'MB', 'GB']; const i = Math.min(Math.floor(Math.log(size) / Math.log(1024)), 3); return `${(size / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`; }
 function clock(seconds) { const n = Math.max(0, Math.floor(Number(seconds) || 0)); const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), s = n % 60; return h ? `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`; }
 function humanDuration(seconds) { const n = Math.max(0, Math.round(Number(seconds) || 0)); const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), s = n % 60; return [h ? `${h} giờ` : '', m ? `${m} phút` : '', `${s} giây`].filter(Boolean).join(' '); }
+function isIOSDevice() { return /iPad|iPhone|iPod/iu.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+async function ensureAudioDuration() {
+  const player = $('#audioPlayer');
+  if (Number.isFinite(player.duration) && player.duration > 0) return player.duration;
+  await new Promise(resolve => {
+    const done = () => { clearTimeout(timer); player.removeEventListener('loadedmetadata', done); resolve(); };
+    const timer = setTimeout(done, 3000);
+    player.addEventListener('loadedmetadata', done, { once: true });
+  });
+  state.duration = Number(player.duration) || state.duration || 0;
+  return state.duration;
+}
 function factText(item) { return typeof item === 'string' ? item : String(item?.text || ''); }
 function secondsFromTime(value) { const parts = String(value || '').split(':').map(Number); return parts.reduce((total, part) => total * 60 + (Number(part) || 0), 0); }
 function evidenceHtml(item) {
@@ -68,7 +81,7 @@ async function decodeAudio(file) {
 
 function createWorker() {
   if (state.worker) state.worker.terminate();
-  const worker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' }); state.worker = worker;
+  const worker = new Worker(new URL(`./ai-worker.js?v=${APP_VERSION}`, import.meta.url), { type: 'module' }); state.worker = worker;
   worker.onmessage = handleWorkerMessage; worker.onerror = event => handleFailure(new Error(event.message || 'AI worker gặp lỗi.')); return worker;
 }
 
@@ -80,18 +93,22 @@ async function startAnalysis() {
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   try {
     const isLongM4a = /\.(m4a|mp4)$/iu.test(state.file.name);
-    const duration = state.duration || Number($('#audioPlayer').duration) || 0;
+    const duration = state.duration || await ensureAudioDuration();
     let quality = $('#qualitySelect').value;
+    if (isIOSDevice() && duration > 8 * 60) {
+      showView('landing');
+      showError('iPhone không thể xử lý an toàn bản ghi dài này hoàn toàn cục bộ.', `File dài ${humanDuration(duration)}. Hãy phân tích trên MacBook bằng chế độ Nhanh, sau đó xuất Project JSON và nhập lại trên iPhone. Không có file âm thanh nào được gửi lên máy chủ.`);
+      return;
+    }
     if (duration >= 45 * 60 && quality !== 'tiny') {
       quality = 'tiny';
       $('#qualitySelect').value = 'tiny';
       setProgress(4, 'Đã bật chế độ an toàn bộ nhớ', 'File trên 45 phút được tự chuyển sang mô hình Nhanh để tránh giật, lag hoặc văng tab.', 1);
       await new Promise(resolve => requestAnimationFrame(resolve));
     }
-    if (isLongM4a) {
+    if (isLongM4a && !isIOSDevice()) {
       setProgress(5, 'Đang chuẩn bị file M4A…', 'Mỗi phần 10 phút sẽ được giải mã, phiên âm rồi giải phóng khỏi RAM.', 1);
-      const fileBuffer = await state.file.arrayBuffer();
-      createWorker().postMessage({ type: 'transcribe', fileBuffer, filename: state.file.name, quality, language: $('#languageSelect').value, webgpu: state.webgpu }, [fileBuffer]);
+      createWorker().postMessage({ type: 'transcribe', file: state.file, filename: state.file.name, quality, language: $('#languageSelect').value, webgpu: state.webgpu });
     } else {
       const audio = await decodeAudio(state.file);
       setProgress(10, 'Đang tải mô hình phiên âm…', `Chế độ ${modelNames[quality]}. Lần đầu có thể mất vài phút.`, 2);
@@ -113,6 +130,7 @@ function handleWorkerMessage(event) {
   const message = event.data || {};
   if (message.type === 'progress') {
     if (message.phase === 'asr-download') setProgress(10 + message.value * .28, 'Đang tải mô hình phiên âm…', message.detail || 'Mô hình được lưu trong bộ nhớ đệm.', 2);
+    if (message.phase === 'container-read') setProgress(5 + message.value * .05, 'Đang đọc cấu trúc M4A theo từng phần…', message.detail || 'Không nạp toàn bộ file vào RAM.', 1);
     if (message.phase === 'audio-decode') setProgress(35 + message.value * .32, 'Đang giải mã và phiên âm cuốn chiếu…', message.detail || 'Đang chuẩn bị âm thanh 16 kHz cho AI.', 2);
     if (message.phase === 'asr-run') setProgress(40 + message.value * .28, 'Đang chuyển giọng nói thành văn bản…', message.detail || 'Whisper đang nghe và tạo mốc thời gian.', 2);
     if (message.phase === 'llm-download') setProgress(70 + message.value * .18, 'Đang tải mô hình viết biên bản…', message.detail || 'Chỉ cần tải một lần trên thiết bị này.', 3);
@@ -134,7 +152,15 @@ function handleWorkerMessage(event) {
   if (message.type === 'error') handleFailure(new Error(message.error || 'Không thể xử lý bằng AI.'));
 }
 
-function handleFailure(error) { if (state.worker) state.worker.terminate(); state.worker = null; showView('landing'); showError(error.message || 'Không thể xử lý file.'); }
+function handleFailure(error) {
+  if (state.worker) state.worker.terminate(); state.worker = null; showView('landing');
+  const raw = error.message || 'Không thể xử lý file.';
+  if (isIOSDevice() && /(decod|operationerror|audio)/iu.test(raw)) {
+    showError('iPhone không giải mã được bản ghi này trong chế độ AI cục bộ.', 'Chrome trên iPhone vẫn dùng bộ máy WebKit của iOS. Hãy phân tích bản ghi dài trên MacBook, rồi xuất Project JSON để xem trên iPhone.');
+    return;
+  }
+  showError(raw);
+}
 
 function renderResults() {
   const notes = state.notes || {}; const title = notes.title && notes.title !== 'Chưa xác định' ? notes.title : (state.file?.name || 'Cuộc họp').replace(/\.[^.]+$/, '');

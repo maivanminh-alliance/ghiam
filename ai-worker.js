@@ -67,7 +67,17 @@ function audioSpecificConfig(mp4File, trackId) {
   return descriptor ? new Uint8Array(descriptor) : undefined;
 }
 
-async function decodeM4a(fileBuffer, onSegment) {
+function adtsFrame(data, sampleRate = 48000, channels = 2) {
+  const frequencyIndex = { 96000: 0, 88200: 1, 64000: 2, 48000: 3, 44100: 4, 32000: 5, 24000: 6, 22050: 7, 16000: 8 }[sampleRate] ?? 3;
+  const frameLength = data.byteLength + 7;
+  const header = new Uint8Array(7);
+  header[0] = 0xff; header[1] = 0xf1; header[2] = (1 << 6) | (frequencyIndex << 2) | ((channels >> 2) & 1);
+  header[3] = ((channels & 3) << 6) | ((frameLength >> 11) & 3); header[4] = (frameLength >> 3) & 0xff;
+  header[5] = ((frameLength & 7) << 5) | 0x1f; header[6] = 0xfc;
+  const frame = new Uint8Array(frameLength); frame.set(header); frame.set(new Uint8Array(data), 7); return frame;
+}
+
+async function decodeM4a(file, onSegment) {
   if (typeof AudioDecoder === 'undefined' || typeof EncodedAudioChunk === 'undefined') {
     throw new Error('Trình duyệt này chưa hỗ trợ giải mã M4A dài. Hãy dùng Chrome hoặc Edge bản mới nhất.');
   }
@@ -80,6 +90,7 @@ async function decodeM4a(fileBuffer, onSegment) {
   let segmentIndex = 0;
   let totalSegments = 1;
   const readySegments = [];
+  const useAdts = /iPhone|iPad|iPod/iu.test(self.navigator?.userAgent || '');
   let track;
   let decoder;
   let settled = false;
@@ -123,7 +134,7 @@ async function decodeM4a(fileBuffer, onSegment) {
           codec: track.codec,
           sampleRate: track.audio.sample_rate,
           numberOfChannels: track.audio.channel_count,
-          description: audioSpecificConfig(mp4File, track.id),
+          description: useAdts ? undefined : audioSpecificConfig(mp4File, track.id),
         };
         const support = await AudioDecoder.isConfigSupported(config);
         if (!support.supported) throw new Error(`Thiết bị không giải mã được ${track.codec}.`);
@@ -148,7 +159,7 @@ async function decodeM4a(fileBuffer, onSegment) {
             type: 'key',
             timestamp: Math.round(sample.cts * 1000000 / sample.timescale),
             duration: Math.round(sample.duration * 1000000 / sample.timescale),
-            data: sample.data,
+            data: useAdts ? adtsFrame(sample.data, track.audio.sample_rate, track.audio.channel_count) : sample.data,
           }));
         }
       } catch (error) { fail(error); return; }
@@ -171,9 +182,17 @@ async function decodeM4a(fileBuffer, onSegment) {
         }
       }).catch(fail);
     };
-    fileBuffer.fileStart = 0;
-    mp4File.appendBuffer(fileBuffer);
-    mp4File.flush();
+    const chunkSize = 2 * 1024 * 1024;
+    const feed = async () => {
+      for (let offset = 0; offset < file.size; offset += chunkSize) {
+        const buffer = await file.slice(offset, Math.min(file.size, offset + chunkSize)).arrayBuffer();
+        buffer.fileStart = offset; mp4File.appendBuffer(buffer);
+        progress('container-read', offset / Math.max(1, file.size) * 100, `Đang đọc cấu trúc M4A ${Math.round(offset / file.size * 100)}%…`);
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      mp4File.flush();
+    };
+    feed().catch(fail);
   });
 
   progress('audio-decode', 100, `Đã xử lý cuốn chiếu ${segmentIndex}/${totalSegments} phần.`);
@@ -215,10 +234,10 @@ async function transcribe(message) {
   await loadTranscriber(message.quality, message.webgpu);
   progress('asr-run', 4, 'Mô hình đã sẵn sàng. Bắt đầu xử lý cuốn chiếu…');
   const transcript = [];
-  if (message.fileBuffer) {
+  if (message.file) {
     progress('audio-decode', 1, 'Đang đọc cấu trúc file M4A…');
-    await decodeM4a(message.fileBuffer, (audio, index, total) => transcribeSegment(audio, index, total, message, transcript));
-    message.fileBuffer = null;
+    await decodeM4a(message.file, (audio, index, total) => transcribeSegment(audio, index, total, message, transcript));
+    message.file = null;
   } else {
     const audioSegments = splitPcm(message.audio || new Float32Array());
     for (let index = 0; index < audioSegments.length; index += 1) {
