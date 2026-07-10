@@ -138,6 +138,10 @@ function handleWorkerMessage(event) {
     return;
   }
   if (message.type === 'transcript') {
+    if (!Array.isArray(message.transcript) || !message.transcript.some(row => String(row.text || '').trim())) {
+      handleFailure(new Error('AI không tạo được transcript từ file này nên chưa thể lập biên bản. Hãy thử Chrome/Edge mới nhất hoặc file M4A ngắn hơn.'));
+      return;
+    }
     state.transcript = (message.transcript || []).map(row => ({ ...row, speaker: 'Người nói 1' }));
     setProgress(70, 'Transcript đã hoàn tất', 'Đang tạo biên bản theo mẫu đã chọn.', 3);
     state.worker.postMessage({ type: 'summarize', transcript: state.transcript, filename: state.file.name, webgpu: state.webgpu, ...generationContext() }); return;
@@ -237,13 +241,18 @@ function loadProject(item) { state.currentId = item.id || crypto.randomUUID(); s
 async function toggleRecording() {
   if (state.mediaRecorder?.state === 'recording') { state.mediaRecorder.stop(); return; }
   try {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw new Error('Trình duyệt không hỗ trợ ghi âm trực tiếp.');
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); state.recordChunks = [];
-    const recorder = new MediaRecorder(stream); state.mediaRecorder = recorder; state.recordStartedAt = Date.now(); $('#recordButton').classList.add('recording'); $('#recordLabel').textContent = 'Đang ghi — bấm để dừng';
+    const supportedTypes = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac'].filter(type => MediaRecorder.isTypeSupported?.(type));
+    const mimeType = supportedTypes[0] || '';
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    state.mediaRecorder = recorder; state.recordStartedAt = Date.now(); $('#recordButton').classList.add('recording'); $('#recordLabel').textContent = 'Đang ghi — bấm để dừng';
     state.recordTimer = setInterval(() => $('#recordTime').textContent = clock((Date.now() - state.recordStartedAt) / 1000), 500);
     recorder.ondataavailable = event => { if (event.data.size) state.recordChunks.push(event.data); };
-    recorder.onstop = () => { clearInterval(state.recordTimer); stream.getTracks().forEach(track => track.stop()); $('#recordButton').classList.remove('recording'); $('#recordLabel').textContent = 'Ghi âm trực tiếp bằng micro'; const blob = new Blob(state.recordChunks, { type: recorder.mimeType || 'audio/webm' }); const ext = blob.type.includes('mp4') ? 'm4a' : 'webm'; setFile(new File([blob], `Ghi âm ${new Date().toLocaleString('vi-VN').replace(/[/:]/g, '-')}.${ext}`, { type: blob.type })); };
+    recorder.onerror = () => { clearInterval(state.recordTimer); stream.getTracks().forEach(track => track.stop()); state.mediaRecorder = null; showError('Không thể ghi âm trực tiếp.', 'Hãy cấp quyền Micro cho GitHub Pages trong cài đặt trình duyệt rồi thử lại.'); };
+    recorder.onstop = () => { clearInterval(state.recordTimer); stream.getTracks().forEach(track => track.stop()); state.mediaRecorder = null; $('#recordButton').classList.remove('recording'); $('#recordLabel').textContent = 'Ghi âm trực tiếp bằng micro'; const blob = new Blob(state.recordChunks, { type: recorder.mimeType || 'audio/webm' }); if (!blob.size) return showError('Bản ghi rỗng.', 'Hãy nói ít nhất vài giây trước khi bấm dừng.'); const ext = blob.type.includes('mp4') ? 'm4a' : 'webm'; setFile(new File([blob], `Ghi âm ${new Date().toLocaleString('vi-VN').replace(/[/:]/g, '-')}.${ext}`, { type: blob.type })); };
     recorder.start(1000);
-  } catch (error) { showError('Không thể truy cập micro.', 'Hãy cấp quyền micro cho website trong cài đặt trình duyệt.'); }
+  } catch (error) { showError(error.message || 'Không thể truy cập micro.', 'Hãy cấp quyền Micro cho GitHub Pages trong cài đặt trình duyệt.'); }
 }
 
 function resetApp() { if (state.worker) state.worker.terminate(); state.worker = null; removeFile(); state.transcript = []; state.notes = null; state.highlights = []; state.askHistory = []; state.images = []; state.currentId = null; $('#imageInput').value = ''; $('#imageCount').textContent = 'Chưa có ảnh'; showView('landing'); }
