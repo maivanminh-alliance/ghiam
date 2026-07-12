@@ -1,44 +1,145 @@
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
-import { createFile as createMp4File } from 'https://cdn.jsdelivr.net/npm/mp4box@2.4.1/+esm';
+// mp4box 0.5.2: bản 2.x không phát onSamples với file M4A từ Voice Memos (moov ở cuối file)
+import * as MP4BoxModule from 'https://cdn.jsdelivr.net/npm/mp4box@0.5.2/+esm';
+const createMp4File = () => (MP4BoxModule.default || MP4BoxModule).createFile();
 
-env.allowLocalModels = false;
-env.allowRemoteModels = true;
-env.useBrowserCache = true;
-
-const whisperModels = {
-  tiny: 'onnx-community/whisper-tiny',
-  base: 'onnx-community/whisper-base',
-  small: 'onnx-community/whisper-small',
-};
-
-const summaryModel = 'onnx-community/Qwen2.5-0.5B-Instruct';
-let transcriber = null;
-let generator = null;
+const API_BASE = 'https://api.openai.com/v1';
+const usageTotals = { inputTokens: 0, outputTokens: 0 };
 
 function progress(phase, value, detail = '') {
   self.postMessage({ type: 'progress', phase, value: Math.max(0, Math.min(100, Number(value) || 0)), detail });
 }
 
-function downloadCallback(phase) {
-  return event => {
-    if (event.status === 'progress') progress(phase, event.progress || 0, event.file || 'Đang tải mô hình…');
-    if (event.status === 'ready') progress(phase, 100, 'Mô hình đã sẵn sàng.');
-  };
+function formatClock(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hours ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-async function loadTranscriber(quality, webgpu) {
-  const model = whisperModels[quality] || whisperModels.tiny;
-  const gpuOptions = { device: 'webgpu', dtype: { encoder_model: 'fp16', decoder_model_merged: 'q4' }, progress_callback: downloadCallback('asr-download') };
-  const cpuOptions = { device: 'wasm', dtype: 'q8', progress_callback: downloadCallback('asr-download') };
+// ---------- Gọi OpenAI ----------
+function apiErrorMessage(status, payload) {
+  const code = payload?.error?.code || '';
+  const detail = payload?.error?.message || '';
+  if (status === 401) return 'API key không đúng hoặc đã bị thu hồi. Kiểm tra lại tại platform.openai.com/api-keys.';
+  if (code === 'insufficient_quota') return 'Tài khoản OpenAI đã hết hạn mức. Vào platform.openai.com → Billing để nạp thêm credit.';
+  if (status === 429) return 'OpenAI đang giới hạn tốc độ. Đợi khoảng một phút rồi thử lại.';
+  if (status === 413 || /too large/iu.test(detail)) return 'File gửi lên vượt giới hạn 25 MB của OpenAI.';
+  if (code === 'model_not_found') return `Model không khả dụng với API key này: ${detail}`;
+  return detail || `Lỗi OpenAI (HTTP ${status}).`;
+}
+
+async function apiFetch(path, { apiKey, body, isForm = false }) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt) await new Promise(resolve => setTimeout(resolve, 1500 * 2 ** attempt));
+    let response;
+    try {
+      response = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, ...(isForm ? {} : { 'Content-Type': 'application/json' }) },
+        body,
+      });
+    } catch (error) { lastError = new Error('Không kết nối được tới api.openai.com. Kiểm tra mạng.'); continue; }
+    if (response.ok) return response.json();
+    const payload = await response.json().catch(() => null);
+    const error = new Error(apiErrorMessage(response.status, payload));
+    error.status = response.status;
+    error.code = payload?.error?.code || '';
+    const retryable = response.status >= 500 || (response.status === 429 && error.code !== 'insufficient_quota');
+    if (!retryable) throw error;
+    lastError = error;
+  }
+  throw lastError || new Error('Không thể gọi OpenAI.');
+}
+
+function trackUsage(data) {
+  usageTotals.inputTokens += Number(data?.usage?.prompt_tokens || data?.usage?.input_tokens || 0);
+  usageTotals.outputTokens += Number(data?.usage?.completion_tokens || data?.usage?.output_tokens || 0);
+}
+
+// ---------- Phiên âm ----------
+function extFromMime(mimeType = '') {
+  if (/mp4|aac/iu.test(mimeType)) return 'm4a';
+  if (/webm/iu.test(mimeType)) return 'webm';
+  if (/ogg/iu.test(mimeType)) return 'ogg';
+  if (/wav/iu.test(mimeType)) return 'wav';
+  if (/mpeg|mp3/iu.test(mimeType)) return 'mp3';
+  return 'webm';
+}
+
+async function transcribeBlob(blob, filename, message) {
+  const buildForm = model => {
+    const form = new FormData();
+    form.append('file', blob, filename);
+    form.append('model', model);
+    if (model === 'whisper-1') {
+      form.append('response_format', 'verbose_json');
+      if (message.language && message.language !== 'auto') form.append('language', message.language);
+      if (message.vocabulary) form.append('prompt', message.vocabulary);
+    } else {
+      form.append('response_format', 'diarized_json');
+      form.append('chunking_strategy', 'auto');
+    }
+    return form;
+  };
   try {
-    transcriber = await pipeline('automatic-speech-recognition', model, webgpu ? gpuOptions : cpuOptions);
+    return await apiFetch('/audio/transcriptions', { apiKey: message.apiKey, body: buildForm(message.sttModel), isForm: true });
   } catch (error) {
-    if (!webgpu) throw error;
-    progress('asr-download', 0, 'WebGPU không tương thích, đang chuyển sang WASM…');
-    transcriber = await pipeline('automatic-speech-recognition', model, cpuOptions);
+    if (error.code === 'model_not_found' && message.sttModel !== 'whisper-1') {
+      progress('asr-run', 0, 'Model tách người nói không khả dụng — chuyển sang Whisper…');
+      message.sttModel = 'whisper-1';
+      return apiFetch('/audio/transcriptions', { apiKey: message.apiKey, body: buildForm('whisper-1'), isForm: true });
+    }
+    throw error;
   }
 }
 
+const speakerNames = new Map();
+function speakerLabel(raw) {
+  if (raw == null || raw === '') return '';
+  const cleaned = String(raw).replace(/^speaker[_\s-]*/iu, '').trim() || String(raw);
+  if (!speakerNames.has(cleaned)) speakerNames.set(cleaned, `Người nói ${cleaned}`);
+  return speakerNames.get(cleaned);
+}
+
+function appendRows(transcript, data, offset) {
+  trackUsage(data);
+  const segments = Array.isArray(data?.segments) ? data.segments : [];
+  const rows = segments.map(segment => {
+    const start = offset + (Number(segment.start) || 0);
+    const end = offset + (Number(segment.end) || 0);
+    return { start, end: end > start ? end : start, time: formatClock(start), text: String(segment.text || '').trim(), speaker: speakerLabel(segment.speaker) };
+  }).filter(row => row.text);
+  if (!rows.length && String(data?.text || '').trim()) rows.push({ start: offset, end: offset, time: formatClock(offset), text: String(data.text).trim(), speaker: '' });
+  transcript.push(...rows);
+}
+
+function wavBlob(float32, sampleRate = 16000) {
+  const dataLength = float32.length * 2;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+  const writeString = (pos, text) => { for (let i = 0; i < text.length; i += 1) view.setUint8(pos + i, text.charCodeAt(i)); };
+  writeString(0, 'RIFF'); view.setUint32(4, 36 + dataLength, true); writeString(8, 'WAVE');
+  writeString(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  writeString(36, 'data'); view.setUint32(40, dataLength, true);
+  let pos = 44;
+  for (let i = 0; i < float32.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, float32[i]));
+    view.setInt16(pos, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    pos += 2;
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function splitPcm(audio, segmentSize = 16000 * 10 * 60) {
+  const segments = [];
+  for (let offset = 0; offset < audio.length; offset += segmentSize) segments.push(audio.slice(offset, Math.min(audio.length, offset + segmentSize)));
+  return segments;
+}
+
+// ---------- Giải mã M4A cuốn chiếu (giữ từ V5) ----------
 function downsampleAudioData(audioData, targetRate = 16000) {
   const frames = audioData.numberOfFrames;
   const channels = audioData.numberOfChannels;
@@ -79,7 +180,7 @@ function adtsFrame(data, sampleRate = 48000, channels = 2) {
 
 async function decodeM4a(file, onSegment) {
   if (typeof AudioDecoder === 'undefined' || typeof EncodedAudioChunk === 'undefined') {
-    throw new Error('Trình duyệt này chưa hỗ trợ giải mã M4A dài. Hãy dùng Chrome hoặc Edge bản mới nhất.');
+    throw new Error('Trình duyệt này chưa hỗ trợ giải mã M4A lớn. Hãy dùng Chrome hoặc Edge bản mới nhất.');
   }
   const mp4File = createMp4File();
   const targetRate = 16000;
@@ -195,87 +296,56 @@ async function decodeM4a(file, onSegment) {
     feed().catch(fail);
   });
 
-  progress('audio-decode', 100, `Đã xử lý cuốn chiếu ${segmentIndex}/${totalSegments} phần.`);
   return { segmentCount: segmentIndex, totalSegments };
 }
 
-function splitPcm(audio, segmentSize = 16000 * 10 * 60) {
-  const segments = [];
-  for (let offset = 0; offset < audio.length; offset += segmentSize) segments.push(audio.slice(offset, Math.min(audio.length, offset + segmentSize)));
-  return segments;
-}
-
-async function transcribeSegment(audio, index, totalSegments, message, transcript) {
-  const sampleRate = 16000;
-  const offsetSeconds = index * 10 * 60;
-  const endSeconds = offsetSeconds + audio.length / sampleRate;
-  const options = {
-    task: 'transcribe',
-    return_timestamps: true,
-    chunk_length_s: 30,
-    stride_length_s: 5,
-  };
-  if (message.language && message.language !== 'auto') options.language = message.language;
-  progress('asr-run', 5 + index / Math.max(1, totalSegments) * 90, `Đang phiên âm cuốn chiếu phần ${index + 1}/${totalSegments} (${formatClock(offsetSeconds)}–${formatClock(endSeconds)})…`);
-  const output = await transcriber(audio, options);
-  const chunks = output.chunks || [];
-  if (chunks.length) {
-    transcript.push(...chunks.map(chunk => {
-      const start = offsetSeconds + (Number(chunk.timestamp?.[0]) || 0);
-      const end = offsetSeconds + (Number(chunk.timestamp?.[1]) || 0);
-      return { start, end, time: formatClock(start), text: String(chunk.text || '').trim() };
-    }).filter(row => row.text));
-  } else if (String(output.text || '').trim()) {
-    transcript.push({ start: offsetSeconds, end: endSeconds, time: formatClock(offsetSeconds), text: String(output.text).trim() });
-  }
-}
-
 async function transcribe(message) {
-  await loadTranscriber(message.quality, message.webgpu);
-  progress('asr-run', 4, 'Mô hình đã sẵn sàng. Bắt đầu xử lý cuốn chiếu…');
+  if (message.engine === 'gemini-claude') return transcribeGemini(message);
+  speakerNames.clear();
   const transcript = [];
-  if (message.file) {
-    progress('audio-decode', 1, 'Đang đọc cấu trúc file M4A…');
-    await decodeM4a(message.file, (audio, index, total) => transcribeSegment(audio, index, total, message, transcript));
+  if (Array.isArray(message.parts) && message.parts.length) {
+    for (let index = 0; index < message.parts.length; index += 1) {
+      const part = message.parts[index];
+      progress('asr-run', 4 + index / message.parts.length * 92, `Đang phiên âm phần ${index + 1}/${message.parts.length}…`);
+      const data = await transcribeBlob(part.blob, `part-${index + 1}.${extFromMime(part.mimeType)}`, message);
+      appendRows(transcript, data, Number(part.offset) || 0);
+    }
+  } else if (message.stream && message.file) {
+    await decodeM4a(message.file, async (audio, index, total) => {
+      progress('asr-run', 4 + index / Math.max(1, total) * 90, `Đang phiên âm phần ${index + 1}/${total} (${formatClock(index * 600)}–${formatClock(index * 600 + audio.length / 16000)})…`);
+      const data = await transcribeBlob(wavBlob(audio), `part-${index + 1}.wav`, message);
+      appendRows(transcript, data, index * 600);
+    });
     message.file = null;
-  } else {
-    const audioSegments = splitPcm(message.audio || new Float32Array());
-    for (let index = 0; index < audioSegments.length; index += 1) {
-      const audio = audioSegments[index];
-      audioSegments[index] = null;
-      await transcribeSegment(audio, index, audioSegments.length, message, transcript);
+  } else if (message.file) {
+    progress('asr-run', 25, 'Đang tải file lên OpenAI…');
+    const data = await transcribeBlob(message.file, message.filename || 'audio.m4a', message);
+    appendRows(transcript, data, 0);
+  } else if (message.audio) {
+    const segments = splitPcm(message.audio);
+    for (let index = 0; index < segments.length; index += 1) {
+      progress('asr-run', 4 + index / segments.length * 92, `Đang phiên âm phần ${index + 1}/${segments.length}…`);
+      const data = await transcribeBlob(wavBlob(segments[index]), `part-${index + 1}.wav`, message);
+      segments[index] = null;
+      appendRows(transcript, data, index * 600);
     }
   }
-  await transcriber.dispose();
-  transcriber = null;
+  transcript.sort((a, b) => a.start - b.start);
   progress('asr-run', 100, 'Transcript đã hoàn tất.');
   self.postMessage({ type: 'transcript', transcript });
 }
 
-function formatClock(seconds) {
-  const total = Math.max(0, Math.floor(Number(seconds) || 0));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  return hours ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-}
-
+// ---------- Chuẩn hóa biên bản ----------
 function extractJson(text) {
   const cleaned = String(text || '').replace(/```(?:json)?/giu, '').replace(/```/gu, '').trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('AI không tạo được JSON.');
+  if (start < 0 || end <= start) throw new Error('AI không trả về JSON hợp lệ.');
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-function list(value, limit = 20) {
-  return Array.isArray(value) ? value.slice(0, limit) : [];
-}
-
-function evidenceList(value) {
-  return [...new Set(list(value, 8).map(item => String(item || '').replace(/[\[\]]/g, '').trim()).filter(Boolean))];
-}
-
+function list(value, limit = 20) { return Array.isArray(value) ? value.slice(0, limit) : []; }
+function evidenceList(value) { return [...new Set(list(value, 8).map(item => String(item || '').replace(/[\[\]]/g, '').trim()).filter(Boolean))]; }
 function normalizeFactItem(item, extras = {}) {
   if (typeof item === 'string') return { text: item, evidence: [], ...extras };
   return {
@@ -285,30 +355,17 @@ function normalizeFactItem(item, extras = {}) {
     ...Object.fromEntries(Object.keys(extras).map(key => [key, String(item?.[key] || extras[key])])),
   };
 }
-
-function normalizeFactCard(value = {}) {
-  return {
-    overview: String(value.overview || value.summary || '').trim(),
-    topics: list(value.topics, 12).map(item => normalizeFactItem(item)).filter(item => item.text),
-    decisions: list(value.decisions, 16).map(item => normalizeFactItem(item, { context: '' })).filter(item => item.text),
-    actions: list(value.actions, 20).map(item => normalizeFactItem(item, { owner: 'Chưa xác định', due: 'Chưa xác định' })).filter(item => item.text),
-    risks: list(value.risks, 12).map(item => normalizeFactItem(item)).filter(item => item.text),
-    questions: list(value.questions, 12).map(item => normalizeFactItem(item)).filter(item => item.text),
-  };
-}
-
 function normalizeNotes(value, filename) {
   const notes = value && typeof value === 'object' ? value : {};
   return {
-    title: String(notes.title || filename.replace(/\.[^.]+$/, '') || 'Cuộc họp mới'),
+    title: String(notes.title || String(filename || '').replace(/\.[^.]+$/, '') || 'Cuộc họp mới'),
     summary: String(notes.summary || 'Chưa xác định.'),
-    keyPoints: list(notes.keyPoints, 12).map(item => typeof item === 'string' ? { text: item, evidence: [] } : normalizeFactItem(item)).filter(item => item.text),
-    decisions: list(notes.decisions, 16).map(item => normalizeFactItem(item, { context: '' })).filter(item => item.text),
-    actions: list(notes.actions, 20).map(item => normalizeFactItem(item, { owner: 'Chưa xác định', due: 'Chưa xác định' })).filter(item => item.text),
-    risks: list(notes.risks, 12).map(item => normalizeFactItem(item)).filter(item => item.text),
+    keyPoints: list(notes.keyPoints, 14).map(item => normalizeFactItem(item)).filter(item => item.text),
+    decisions: list(notes.decisions, 20).map(item => normalizeFactItem(item, { context: '' })).filter(item => item.text),
+    actions: list(notes.actions, 24).map(item => normalizeFactItem(item, { owner: 'Chưa xác định', due: 'Chưa xác định' })).filter(item => item.text),
+    risks: list(notes.risks, 14).map(item => normalizeFactItem(item)).filter(item => item.text),
   };
 }
-
 function heuristicNotes(transcript, filename) {
   const sentences = transcript.map(row => row.text.trim()).filter(text => text.length > 18);
   const unique = [...new Set(sentences)];
@@ -316,167 +373,21 @@ function heuristicNotes(transcript, filename) {
   const decisions = unique.filter(text => /(chốt|thống nhất|quyết định|đồng ý|phê duyệt)/iu.test(text)).slice(0, 10).map(text => ({ text, context: 'Trích từ transcript', evidence: [evidenceFor(text)].filter(Boolean) }));
   const actionPattern = /(sẽ|cần|phụ trách|hoàn thành|gửi|kiểm tra|cập nhật|chuẩn bị|thực hiện)/iu;
   const actions = unique.filter(text => actionPattern.test(text)).slice(0, 12).map(text => ({
-    text,
-    owner: 'Chưa xác định',
+    text, owner: 'Chưa xác định',
     due: text.match(/(?:ngày\s*)?\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?/u)?.[0] || 'Chưa xác định',
     evidence: [evidenceFor(text)].filter(Boolean),
   }));
   const keyPoints = unique.slice(0, 7).map(text => ({ text, evidence: [evidenceFor(text)].filter(Boolean) }));
   return {
-    title: filename.replace(/\.[^.]+$/, '') || 'Cuộc họp mới',
+    title: String(filename || '').replace(/\.[^.]+$/, '') || 'Cuộc họp mới',
     summary: keyPoints.slice(0, 3).map(item => item.text).join(' ') || 'Chưa đủ nội dung để tóm tắt.',
-    keyPoints,
-    decisions,
-    actions,
-    risks: [],
+    keyPoints, decisions, actions, risks: [],
   };
 }
-
-function chunkTranscript(transcript, maxCharacters = 6500, maxSeconds = 8 * 60) {
-  const chunks = [];
-  let current = [];
-  let characters = 0;
-  let chunkStart = 0;
-  for (const row of transcript) {
-    const lineLength = String(row.text || '').length + 24;
-    const elapsed = current.length ? (Number(row.end || row.start) || 0) - chunkStart : 0;
-    if (current.length && (characters + lineLength > maxCharacters || elapsed > maxSeconds)) {
-      chunks.push(current);
-      current = [];
-      characters = 0;
-    }
-    if (!current.length) chunkStart = Number(row.start) || 0;
-    current.push(row);
-    characters += lineLength;
-  }
-  if (current.length) chunks.push(current);
-  return chunks;
-}
-
-function transcriptText(rows) {
-  return rows.map(row => `[${row.time}] ${row.speaker || 'Người nói'}: ${row.text}`).join('\n');
-}
-
-function heuristicFactCard(rows) {
-  const card = heuristicNotes(rows, '');
-  return normalizeFactCard({
-    overview: card.summary,
-    topics: card.keyPoints,
-    decisions: card.decisions,
-    actions: card.actions,
-  });
-}
-
-function combineCards(cards) {
-  const uniqueItems = (key, limit) => {
-    const seen = new Set();
-    return cards.flatMap(card => card[key] || []).filter(item => {
-      const fingerprint = String(item.text || '').toLocaleLowerCase('vi').replace(/\s+/g, ' ').trim();
-      if (!fingerprint || seen.has(fingerprint)) return false;
-      seen.add(fingerprint);
-      return true;
-    }).slice(0, limit);
-  };
-  return normalizeFactCard({
-    overview: cards.map(card => card.overview).filter(Boolean).join(' '),
-    topics: uniqueItems('topics', 18),
-    decisions: uniqueItems('decisions', 22),
-    actions: uniqueItems('actions', 26),
-    risks: uniqueItems('risks', 16),
-    questions: uniqueItems('questions', 16),
-  });
-}
-
-function generatedContent(output) {
-  const generated = output?.[0]?.generated_text;
-  return Array.isArray(generated) ? generated.at(-1)?.content : String(generated || '');
-}
-
-async function loadGenerator(webgpu) {
-  if (generator) return generator;
-  const options = {
-    device: webgpu ? 'webgpu' : 'wasm',
-    dtype: 'q4',
-    progress_callback: downloadCallback('llm-download'),
-  };
-  try {
-    generator = await pipeline('text-generation', summaryModel, options);
-  } catch (error) {
-    if (!webgpu) throw error;
-    generator = await pipeline('text-generation', summaryModel, { ...options, device: 'wasm' });
-  }
-}
-
-const templateInstructions = {
-  meeting: 'Tạo biên bản chuẩn: mục tiêu, nội dung chính, quyết định và việc cần làm.',
-  executive: 'Ưu tiên góc nhìn lãnh đạo: kết luận, tác động, rủi ro và quyết định cần phê duyệt.',
-  project: 'Ưu tiên tiến độ, mốc bàn giao, vướng mắc, phụ thuộc, rủi ro và chủ sở hữu hành động.',
-  sales: 'Ưu tiên nhu cầu khách hàng, pain points, phản đối, cam kết, cơ hội và bước tiếp theo.',
-  interview: 'Tổ chức theo câu hỏi, câu trả lời, năng lực, dẫn chứng, điểm mạnh và vấn đề cần xác minh.',
-  lecture: 'Tổ chức thành kiến thức cốt lõi, khái niệm, ví dụ, công thức và câu hỏi ôn tập.',
-  brainstorm: 'Nhóm các ý tưởng theo chủ đề, đánh giá tiềm năng, rào cản và bước thử nghiệm tiếp theo.',
-  custom: 'Tuân thủ ghi chú định hướng do người dùng cung cấp.',
-};
-
-async function analyzeChunk(rows, message, index, total) {
-  const start = rows[0]?.time || '00:00';
-  const end = rows.at(-1)?.time || start;
-  const prompt = `Đọc TOÀN BỘ khối transcript ${index + 1}/${total} (${start}-${end}). Chỉ ghi nhận dữ kiện xuất hiện trong khối, không suy diễn. Mỗi dữ kiện phải giữ mốc thời gian gần nhất.
-Ngữ cảnh: ${message.context || 'Không có'}
-Từ vựng cần giữ đúng: ${message.vocabulary || 'Không có'}
-Trả về duy nhất JSON:
-{"overview":"nội dung khối","topics":[{"text":"chủ đề","evidence":["MM:SS"]}],"decisions":[{"text":"quyết định rõ ràng","context":"bối cảnh","evidence":["MM:SS"]}],"actions":[{"text":"việc cần làm","owner":"người phụ trách hoặc Chưa xác định","due":"thời hạn hoặc Chưa xác định","evidence":["MM:SS"]}],"risks":[{"text":"rủi ro/vướng mắc","evidence":["MM:SS"]}],"questions":[{"text":"vấn đề chưa kết luận","evidence":["MM:SS"]}]}
-
-TRANSCRIPT KHỐI ${index + 1}:
-${transcriptText(rows)}`;
-  const output = await generator([
-    { role: 'system', content: 'Bạn là chuyên viên kiểm kê sự kiện cuộc họp. Viết tiếng Việt, bám sát bằng chứng và tuyệt đối không bịa.' },
-    { role: 'user', content: prompt },
-  ], { max_new_tokens: 800, do_sample: false, repetition_penalty: 1.06 });
-  return normalizeFactCard(extractJson(generatedContent(output)));
-}
-
-async function mergeCardBatch(cards, pass, batch, totalBatches) {
-  const prompt = `Hợp nhất các thẻ sự kiện sau. Loại trùng lặp nhưng KHÔNG bỏ sót sự kiện khác nhau. Giữ nguyên evidence, owner, due và các thay đổi quyết định về sau. Không thêm dữ kiện mới.
-Trả về duy nhất JSON cùng schema: overview, topics, decisions, actions, risks, questions; mỗi mục có text và evidence.
-
-THẺ SỰ KIỆN:
-${JSON.stringify(cards)}`;
-  progress('llm-run', 74 + Math.min(14, pass * 4 + (batch + 1) / totalBatches * 4), `Đang hợp nhất bằng chứng — lượt ${pass}, nhóm ${batch + 1}/${totalBatches}…`);
-  try {
-    const output = await generator([
-      { role: 'system', content: 'Bạn hợp nhất hồ sơ cuộc họp. Không lược bỏ dữ kiện có bằng chứng.' },
-      { role: 'user', content: prompt },
-    ], { max_new_tokens: 1000, do_sample: false, repetition_penalty: 1.06 });
-    return normalizeFactCard(extractJson(generatedContent(output)));
-  } catch (error) {
-    console.warn('Fact-card merge fallback:', error);
-    return combineCards(cards);
-  }
-}
-
-async function hierarchicalMerge(cards) {
-  let current = cards;
-  let pass = 1;
-  while (current.length > 4) {
-    const groups = [];
-    for (let index = 0; index < current.length; index += 4) groups.push(current.slice(index, index + 4));
-    const next = [];
-    for (let index = 0; index < groups.length; index += 1) next.push(await mergeCardBatch(groups[index], pass, index, groups.length));
-    current = next;
-    pass += 1;
-  }
-  return current;
-}
-
-function validEvidence(evidence, knownTimes) {
-  return evidenceList(evidence).filter(time => knownTimes.has(time));
-}
-
 function validateNotes(notes, transcript, coverage) {
   const knownTimes = new Set(transcript.map(row => String(row.time || '')));
   const validate = item => {
-    const evidence = validEvidence(item.evidence, knownTimes);
+    const evidence = evidenceList(item.evidence).filter(time => knownTimes.has(time));
     return { ...item, evidence, confidence: evidence.length ? 'high' : 'low' };
   };
   const validated = {
@@ -489,102 +400,358 @@ function validateNotes(notes, transcript, coverage) {
   const lowConfidence = [...validated.decisions, ...validated.actions].filter(item => item.confidence === 'low').length;
   validated.coverage = {
     ...coverage,
-    percent: transcript.length && coverage.processedChunks === coverage.totalChunks ? 100 : Math.round(coverage.processedChunks / Math.max(1, coverage.totalChunks) * 100),
+    percent: coverage.totalChunks ? Math.round(coverage.processedChunks / Math.max(1, coverage.totalChunks) * 100) : 100,
     lowConfidence,
     warnings: [...coverage.warnings, ...(lowConfidence ? [`${lowConfidence} kết luận chưa có mốc bằng chứng hợp lệ.`] : [])],
   };
   return validated;
 }
+function transcriptText(rows) { return rows.map(row => `[${row.time}] ${row.speaker || 'Người nói'}: ${row.text}`).join('\n'); }
 
-function notesFromCards(cards, filename) {
-  const combined = combineCards(cards);
-  return normalizeNotes({
-    title: filename.replace(/\.[^.]+$/, '') || 'Cuộc họp mới',
-    summary: combined.overview || 'Chưa đủ nội dung để tóm tắt.',
-    keyPoints: combined.topics,
-    decisions: combined.decisions,
-    actions: combined.actions,
-    risks: combined.risks,
-  }, filename);
+// ---------- GPT viết biên bản ----------
+const templateInstructions = {
+  meeting: 'Tạo biên bản chuẩn: mục tiêu, nội dung chính, quyết định và việc cần làm.',
+  executive: 'Ưu tiên góc nhìn lãnh đạo: kết luận, tác động, rủi ro và quyết định cần phê duyệt.',
+  project: 'Ưu tiên tiến độ, mốc bàn giao, vướng mắc, phụ thuộc, rủi ro và chủ sở hữu hành động.',
+  sales: 'Ưu tiên nhu cầu khách hàng, pain points, phản đối, cam kết, cơ hội và bước tiếp theo.',
+  interview: 'Tổ chức theo câu hỏi, câu trả lời, năng lực, dẫn chứng, điểm mạnh và vấn đề cần xác minh.',
+  lecture: 'Tổ chức thành kiến thức cốt lõi, khái niệm, ví dụ, công thức và câu hỏi ôn tập.',
+  brainstorm: 'Nhóm các ý tưởng theo chủ đề, đánh giá tiềm năng, rào cản và bước thử nghiệm tiếp theo.',
+  custom: 'Tuân thủ ghi chú định hướng do người dùng cung cấp.',
+};
+
+const NOTES_SCHEMA = '{"title":"tiêu đề ngắn","summary":"tóm tắt điều hành 5-8 câu","keyPoints":[{"text":"điểm chính","evidence":["mốc thời gian"]}],"decisions":[{"text":"quyết định","context":"bối cảnh","evidence":["mốc thời gian"]}],"actions":[{"text":"việc cần làm","owner":"người phụ trách hoặc Chưa xác định","due":"thời hạn hoặc Chưa xác định","evidence":["mốc thời gian"]}],"risks":[{"text":"rủi ro","evidence":["mốc thời gian"]}]}';
+
+async function chatJson(message, systemText, userText) {
+  const body = JSON.stringify({
+    model: message.summaryModel,
+    messages: [{ role: 'system', content: systemText }, { role: 'user', content: userText }],
+    response_format: { type: 'json_object' },
+  });
+  const data = await apiFetch('/chat/completions', { apiKey: message.apiKey, body });
+  trackUsage(data);
+  return extractJson(data.choices?.[0]?.message?.content || '');
 }
 
 async function summarize(message) {
-  const chunks = chunkTranscript(message.transcript || []);
-  const cards = [];
+  if (message.engine === 'gemini-claude') return summarizeClaude(message);
+  const transcript = message.transcript || [];
+  const fullText = transcriptText(transcript);
+  const PART_LIMIT = 300000;
   const warnings = [];
-  let fallback = false;
   try {
-    await loadGenerator(message.webgpu);
-    progress('llm-run', 4, `Đã chia transcript thành ${chunks.length} khối liên tiếp, không bỏ sót.`);
-    for (let index = 0; index < chunks.length; index += 1) {
-      progress('llm-run', 6 + (index / Math.max(1, chunks.length)) * 66, `Đang đọc toàn bộ khối ${index + 1}/${chunks.length}…`);
-      try {
-        cards.push(await analyzeChunk(chunks[index], message, index, chunks.length));
-      } catch (error) {
-        console.warn(`Chunk ${index + 1} fallback:`, error);
-        cards.push(heuristicFactCard(chunks[index]));
-        warnings.push(`Khối ${index + 1} dùng chế độ trích xuất nhẹ.`);
-        fallback = true;
+    let sourceLabel = 'TRANSCRIPT ĐẦY ĐỦ';
+    let sourceText = fullText;
+    let totalChunks = 1;
+    if (fullText.length > PART_LIMIT) {
+      const parts = [];
+      for (let offset = 0; offset < fullText.length; offset += PART_LIMIT) parts.push(fullText.slice(offset, offset + PART_LIMIT));
+      totalChunks = parts.length;
+      const extracted = [];
+      for (let index = 0; index < parts.length; index += 1) {
+        progress('llm-run', 5 + index / parts.length * 55, `GPT đang đọc phần ${index + 1}/${parts.length} của transcript…`);
+        extracted.push(await chatJson(message,
+          'Bạn là chuyên viên kiểm kê dữ kiện cuộc họp. Viết tiếng Việt, bám sát bằng chứng, không bịa. Trả về JSON.',
+          `Trích xuất dữ kiện từ phần ${index + 1}/${parts.length} của transcript. Mỗi dữ kiện kèm evidence là mốc thời gian sao chép NGUYÊN VĂN từ đầu dòng transcript (trong ngoặc vuông). Trả về duy nhất JSON theo cấu trúc: ${NOTES_SCHEMA}\n\n${parts[index]}`));
       }
+      sourceLabel = `HỒ SƠ DỮ KIỆN (trích từ toàn bộ ${parts.length} phần transcript)`;
+      sourceText = JSON.stringify(extracted);
     }
-    const mergedCards = await hierarchicalMerge(cards);
-    progress('llm-run', 91, 'Đang viết tóm tắt cuối từ hồ sơ đã kiểm kê…');
-    const prompt = `Tạo biên bản cuối từ HỒ SƠ SỰ KIỆN đã được trích xuất từ toàn bộ transcript. Không bịa dữ kiện. ${templateInstructions[message.template] || templateInstructions.meeting}
+    progress('llm-run', 65, 'GPT đang viết biên bản cuối…');
+    const prompt = `Tạo biên bản cuộc họp từ ${sourceLabel} bên dưới. ${templateInstructions[message.template] || templateInstructions.meeting}
 Ghi chú định hướng: ${message.context || 'Không có'}
 Từ vựng riêng cần giữ đúng chính tả: ${message.vocabulary || 'Không có'}
-Tệp hình ảnh tham chiếu (chỉ dùng tên tệp làm ngữ cảnh, không suy đoán nội dung ảnh): ${(message.images || []).join(', ') || 'Không có'}
-Trả về duy nhất JSON hợp lệ theo cấu trúc:
-{"title":"tiêu đề ngắn","summary":"tóm tắt điều hành","keyPoints":[{"text":"điểm chính","evidence":["MM:SS"]}],"decisions":[{"text":"quyết định","context":"bối cảnh","evidence":["MM:SS"]}],"actions":[{"text":"việc cần làm","owner":"người phụ trách hoặc Chưa xác định","due":"thời hạn hoặc Chưa xác định","evidence":["MM:SS"]}],"risks":[{"text":"rủi ro","evidence":["MM:SS"]}]}
-
+Tệp hình ảnh tham chiếu (chỉ dùng tên tệp làm ngữ cảnh): ${(message.images || []).join(', ') || 'Không có'}
+Quy tắc evidence: mỗi mục trong keyPoints, decisions, actions, risks phải kèm 1-3 mốc thời gian sao chép NGUYÊN VĂN từ transcript (chuỗi trong ngoặc vuông đầu dòng, ví dụ "03:15" hoặc "01:02:33"). Không tự chế mốc thời gian. Không bịa dữ kiện.
 Tên file: ${message.filename}
-HỒ SƠ SỰ KIỆN ĐÃ BAO PHỦ ${chunks.length}/${chunks.length} KHỐI:
-${JSON.stringify(mergedCards)}`;
-    const output = await generator([
-      { role: 'system', content: 'Bạn là thư ký cuộc họp chuyên nghiệp. Viết tiếng Việt, chính xác, ngắn gọn và không suy diễn.' },
-      { role: 'user', content: prompt },
-    ], { max_new_tokens: 1100, do_sample: false, repetition_penalty: 1.06 });
-    const notes = normalizeNotes(extractJson(generatedContent(output)), message.filename);
-    const validated = validateNotes(notes, message.transcript, { totalChunks: chunks.length, processedChunks: cards.length, warnings });
-    progress('llm-run', 100, `Đã phân tích ${cards.length}/${chunks.length} khối transcript.`);
-    self.postMessage({ type: 'result', notes: validated, fallback });
+Trả về duy nhất JSON theo cấu trúc: ${NOTES_SCHEMA}
+
+${sourceLabel}:
+${sourceText}`;
+    const notes = normalizeNotes(await chatJson(message, 'Bạn là thư ký cuộc họp chuyên nghiệp. Viết tiếng Việt, chính xác, đầy đủ và không suy diễn. Trả về JSON.', prompt), message.filename);
+    const validated = validateNotes(notes, transcript, { totalChunks, processedChunks: totalChunks, warnings });
+    progress('llm-run', 100, 'Biên bản đã hoàn tất.');
+    self.postMessage({ type: 'result', notes: validated, fallback: false, usage: { ...usageTotals } });
   } catch (error) {
-    console.warn('Local multi-pass summary fallback:', error);
-    const notes = cards.length ? notesFromCards(cards, message.filename) : heuristicNotes(message.transcript, message.filename);
-    const validated = validateNotes(notes, message.transcript, { totalChunks: chunks.length, processedChunks: cards.length || chunks.length, warnings: [...warnings, 'Bước tổng hợp cuối dùng chế độ nhẹ.'] });
-    fallback = true;
-    progress('llm-run', 100, `Đã phân tích ${validated.coverage.processedChunks}/${validated.coverage.totalChunks} khối transcript.`);
-    self.postMessage({ type: 'result', notes: validated, fallback });
+    const notes = heuristicNotes(transcript, message.filename);
+    const validated = validateNotes(notes, transcript, { totalChunks: 1, processedChunks: 1, warnings: [`Tóm tắt bằng GPT thất bại: ${error.message} — bên dưới là bản trích xuất thô, transcript vẫn đầy đủ.`] });
+    progress('llm-run', 100, 'Đã dùng chế độ trích xuất thô.');
+    self.postMessage({ type: 'result', notes: validated, fallback: true, usage: { ...usageTotals } });
   }
 }
 
-function relevantSegments(transcript, question, limit = 6) {
+// ---------- Hỏi AI ----------
+function relevantSegments(transcript, question, limit = 8) {
   const words = question.toLocaleLowerCase('vi').split(/\s+/u).filter(word => word.length > 2);
   return transcript.map(row => ({ row, score: words.reduce((score, word) => score + (row.text.toLocaleLowerCase('vi').includes(word) ? 1 : 0), 0) }))
     .sort((a, b) => b.score - a.score).filter(item => item.score > 0).slice(0, limit).map(item => item.row);
 }
 
 async function ask(message) {
-  const relevant = relevantSegments(message.transcript, message.question);
+  if (message.engine === 'gemini-claude') return askClaude(message);
+  const transcript = message.transcript || [];
   try {
-    await loadGenerator(message.webgpu);
-    const evidence = relevant.length ? relevant : message.transcript.slice(0, 10);
-    const prompt = `Chỉ trả lời dựa trên transcript được cung cấp. Nếu không đủ bằng chứng, nói rõ "Không tìm thấy trong bản ghi". Mỗi nhận định quan trọng phải kèm mốc thời gian dạng [MM:SS].
-
-CÂU HỎI: ${message.question}
-
-TRÍCH ĐOẠN LIÊN QUAN:
-${evidence.map(row => `[${row.time}] ${row.speaker || 'Người nói'}: ${row.text}`).join('\n')}`;
-    const output = await generator([
-      { role: 'system', content: 'Bạn là trợ lý hỏi đáp cuộc họp. Trả lời ngắn gọn bằng tiếng Việt và luôn bám sát bằng chứng.' },
-      { role: 'user', content: prompt },
-    ], { max_new_tokens: 420, do_sample: false, repetition_penalty: 1.05 });
-    const generated = output?.[0]?.generated_text;
-    const answer = Array.isArray(generated) ? generated.at(-1)?.content : String(generated || '');
-    const references = [...answer.matchAll(/\[(\d{1,2}):(\d{2})\]/g)].map(match => Number(match[1]) * 60 + Number(match[2]));
+    const fullText = transcriptText(transcript);
+    const contextText = fullText.length <= 150000 ? fullText : transcriptText(relevantSegments(transcript, message.question, 40));
+    const body = JSON.stringify({
+      model: message.summaryModel,
+      messages: [
+        { role: 'system', content: 'Bạn là trợ lý hỏi đáp cuộc họp. Trả lời ngắn gọn bằng tiếng Việt, chỉ dựa trên transcript được cung cấp. Nếu không đủ bằng chứng, nói rõ "Không tìm thấy trong bản ghi". Mỗi nhận định quan trọng kèm mốc thời gian dạng [MM:SS] hoặc [HH:MM:SS] sao chép từ transcript.' },
+        { role: 'user', content: `CÂU HỎI: ${message.question}\n\nTRANSCRIPT:\n${contextText}` },
+      ],
+    });
+    const data = await apiFetch('/chat/completions', { apiKey: message.apiKey, body });
+    trackUsage(data);
+    const answer = String(data.choices?.[0]?.message?.content || '').trim();
+    const references = [...answer.matchAll(/\[(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\]/g)].map(match => (Number(match[1]) || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
     self.postMessage({ type: 'answer', answer: answer || 'Không tìm thấy trong bản ghi.', references: [...new Set(references)] });
-  } catch {
-    const answer = relevant.length ? relevant.map(row => `[${row.time}] ${row.text}`).join('\n') : 'Không tìm thấy nội dung phù hợp trong bản ghi.';
-    self.postMessage({ type: 'answer', answer, references: relevant.map(row => row.start || 0) });
+  } catch (error) {
+    self.postMessage({ type: 'answer', answer: `Không hỏi được GPT: ${error.message}`, references: [] });
+  }
+}
+
+// ============ ENGINE 2: GEMINI (phiên âm) + CLAUDE (biên bản, sơ đồ) ============
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+const GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-3-flash', 'gemini-2.5-flash'];
+const CLAUDE_BASE = 'https://api.anthropic.com/v1';
+
+function geminiErrorMessage(status, payload) {
+  const detail = payload?.error?.message || '';
+  if (status === 400 && /API key/iu.test(detail)) return 'API key Gemini không hợp lệ. Kiểm tra lại tại aistudio.google.com/apikey.';
+  if (status === 403) return `API key Gemini không có quyền hoặc bị chặn. ${detail}`;
+  if (status === 429) return 'Gemini đang giới hạn tốc độ (hết quota trong ngày hoặc gọi quá nhanh). Đợi một lúc rồi thử lại.';
+  return detail || `Lỗi Gemini (HTTP ${status}).`;
+}
+
+async function geminiFetch(url, options = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt) await new Promise(resolve => setTimeout(resolve, 1500 * 2 ** attempt));
+    let response;
+    try { response = await fetch(url, options); }
+    catch { lastError = new Error('Không kết nối được tới Gemini. Kiểm tra mạng.'); continue; }
+    if (response.ok) return response;
+    const payload = await response.json().catch(() => null);
+    const error = new Error(geminiErrorMessage(response.status, payload));
+    error.status = response.status;
+    if (response.status < 500 && response.status !== 429) throw error;
+    lastError = error;
+  }
+  throw lastError || new Error('Không thể gọi Gemini.');
+}
+
+async function geminiUpload(blob, mimeType, apiKey, label) {
+  const startResp = await geminiFetch(`${GEMINI_BASE}/upload/v1beta/files?key=${apiKey}`, {
+    method: 'POST',
+    headers: {
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': String(blob.size),
+      'X-Goog-Upload-Header-Content-Type': mimeType,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ file: { display_name: label } }),
+  });
+  const uploadUrl = startResp.headers.get('x-goog-upload-url');
+  if (!uploadUrl) throw new Error('Gemini không trả về địa chỉ upload file.');
+  const uploadResp = await geminiFetch(uploadUrl, {
+    method: 'POST',
+    headers: { 'X-Goog-Upload-Command': 'upload, finalize', 'X-Goog-Upload-Offset': '0' },
+    body: blob,
+  });
+  let file = (await uploadResp.json()).file;
+  for (let waited = 0; file?.state === 'PROCESSING' && waited < 300; waited += 3) {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    const poll = await geminiFetch(`${GEMINI_BASE}/v1beta/${file.name}?key=${apiKey}`);
+    file = await poll.json();
+  }
+  if (file?.state !== 'ACTIVE') throw new Error(`Gemini chưa xử lý xong file âm thanh (trạng thái ${file?.state || 'không rõ'}).`);
+  return file;
+}
+
+async function geminiGenerate(apiKey, parts, maxOutputTokens = 65536) {
+  let lastError = null;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const resp = await geminiFetch(`${GEMINI_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0, maxOutputTokens },
+        }),
+      });
+      const data = await resp.json();
+      const candidate = data.candidates?.[0];
+      const text = (candidate?.content?.parts || []).map(part => part.text || '').join('');
+      if (!text) throw new Error(candidate?.finishReason ? `Gemini dừng vì ${candidate.finishReason}.` : 'Gemini không trả về nội dung.');
+      return { text, truncated: candidate?.finishReason === 'MAX_TOKENS' };
+    } catch (error) {
+      if (error.status === 404 || /not found|not supported|is not available/iu.test(error.message || '')) { lastError = error; continue; }
+      throw error;
+    }
+  }
+  throw lastError || new Error('Không tìm thấy model Gemini khả dụng với key này.');
+}
+
+async function transcribeGemini(message) {
+  speakerNames.clear();
+  const apiKey = message.geminiKey;
+  const parts = message.uploadParts || [];
+  if (!parts.length) throw new Error('Không có dữ liệu âm thanh để gửi tới Gemini.');
+
+  const uploaded = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    progress('asr-run', 2 + index / parts.length * 28, `Đang tải phần ${index + 1}/${parts.length} lên Gemini (${Math.round((parts[index].blob?.size || 0) / 1048576)} MB)…`);
+    const file = await geminiUpload(parts[index].blob, parts[index].mimeType, apiKey, `part-${index + 1}`);
+    uploaded.push({ offset: Number(parts[index].offset) || 0, uri: file.uri, mime: file.mimeType || parts[index].mimeType });
+  }
+
+  // File đơn quá dài: gọi nhiều lượt theo khung 60 phút trên cùng file; nhiều phần: gom ~6 phần (≈1 giờ)/lượt
+  const jobs = [];
+  const totalSeconds = Number(message.durationSeconds) || 0;
+  if (uploaded.length === 1 && totalSeconds > 4500) {
+    for (let t = 0; t < totalSeconds; t += 3600) jobs.push({ group: uploaded, range: [t, Math.min(totalSeconds, Math.ceil(t + 3600))] });
+  } else {
+    for (let index = 0; index < uploaded.length; index += 6) jobs.push({ group: uploaded.slice(index, index + 6), range: null });
+  }
+
+  const transcript = [];
+  let speakerHint = '';
+  for (let j = 0; j < jobs.length; j += 1) {
+    const { group, range } = jobs[j];
+    progress('asr-run', 32 + j / jobs.length * 62, `Gemini đang phiên âm ${jobs.length > 1 ? `lượt ${j + 1}/${jobs.length}` : 'toàn bộ bản ghi'}…`);
+    const fileParts = group.map(item => ({ file_data: { file_uri: item.uri, mime_type: item.mime } }));
+    const prompt = `Phiên âm ${group.length > 1 ? `${group.length} file âm thanh sau (là các phần LIÊN TIẾP của cùng một buổi ghi, theo đúng thứ tự)` : 'file âm thanh sau'} sang văn bản${message.language && message.language !== 'auto' ? ` (ngôn ngữ chính: ${message.language === 'vi' ? 'tiếng Việt' : message.language})` : ''}.
+Yêu cầu:
+- Tách người nói, dùng nhãn A, B, C… nhất quán trong toàn bộ buổi ghi.${speakerHint}
+- Chia thành các đoạn ngắn theo lượt nói.
+- "part" là số thứ tự file trong danh sách (bắt đầu từ 1); "start"/"end" là GIÂY tính trong file đó.${range ? `\n- CHỈ phiên âm đoạn từ giây ${range[0]} đến giây ${range[1]} của file; "start"/"end" vẫn tính theo mốc của cả file.` : ''}
+- Từ vựng cần viết đúng chính tả: ${message.vocabulary || 'Không có'}.
+Trả về DUY NHẤT JSON hợp lệ: {"segments":[{"part":1,"start":0.0,"end":4.5,"speaker":"A","text":"..."}]}`;
+    const { text, truncated } = await geminiGenerate(apiKey, [...fileParts, { text: prompt }]);
+    const data = extractJson(text);
+    const segments = Array.isArray(data?.segments) ? data.segments : [];
+    for (const segment of segments) {
+      const local = group[Math.max(0, Math.min(group.length - 1, (Number(segment.part) || 1) - 1))];
+      const start = local.offset + (Number(segment.start) || 0);
+      const end = local.offset + (Number(segment.end) || 0);
+      const line = String(segment.text || '').trim();
+      if (line) transcript.push({ start, end: end > start ? end : start, time: formatClock(start), text: line, speaker: speakerLabel(segment.speaker) });
+    }
+    if (truncated) progress('asr-run', 32 + (j + 1) / jobs.length * 62, `⚠ Lượt ${j + 1} dài quá giới hạn, transcript có thể thiếu phần cuối.`);
+    const seen = [...new Set(transcript.map(row => row.speaker))].filter(Boolean).join(', ');
+    speakerHint = seen ? `\n- Các người nói đã xuất hiện ở phần trước: ${seen}. Nhận diện giọng và tiếp tục dùng đúng nhãn cũ.` : '';
+  }
+
+  transcript.sort((a, b) => a.start - b.start);
+  progress('asr-run', 100, 'Transcript đã hoàn tất.');
+  self.postMessage({ type: 'transcript', transcript });
+}
+
+async function claudeMessages(message, systemText, userText, maxTokens = 8192) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt) await new Promise(resolve => setTimeout(resolve, 1500 * 2 ** attempt));
+    let response;
+    try {
+      response = await fetch(`${CLAUDE_BASE}/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': message.claudeKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: message.claudeModel || 'claude-sonnet-5',
+          max_tokens: maxTokens,
+          system: systemText,
+          messages: [{ role: 'user', content: userText }],
+        }),
+      });
+    } catch { lastError = new Error('Không kết nối được tới api.anthropic.com. Kiểm tra mạng.'); continue; }
+    const data = await response.json().catch(() => null);
+    if (response.ok) {
+      usageTotals.inputTokens += Number(data?.usage?.input_tokens || 0);
+      usageTotals.outputTokens += Number(data?.usage?.output_tokens || 0);
+      if (data?.stop_reason === 'refusal') throw new Error('Claude từ chối xử lý nội dung này.');
+      return (data?.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
+    }
+    const detail = data?.error?.message || '';
+    const error = new Error(
+      response.status === 401 ? 'API key Claude không đúng. Kiểm tra tại console.anthropic.com/settings/keys.'
+        : response.status === 429 ? 'Claude đang giới hạn tốc độ. Đợi một phút rồi thử lại.'
+        : response.status === 404 ? `Model Claude không khả dụng với key này: ${detail}`
+        : detail || `Lỗi Claude (HTTP ${response.status}).`);
+    if (response.status < 500 && response.status !== 429) throw error;
+    lastError = error;
+  }
+  throw lastError || new Error('Không thể gọi Claude.');
+}
+
+const NOTES_SCHEMA_MM = NOTES_SCHEMA.slice(0, -1) + ',"mindmap":"mã Mermaid mindmap tiếng Việt: dòng đầu là chữ mindmap, dòng sau là node gốc dạng root((tiêu đề)), các nhánh là chủ đề chính, nhánh con là quyết định/việc/rủi ro quan trọng"}';
+
+async function summarizeClaude(message) {
+  const transcript = message.transcript || [];
+  const fullText = transcriptText(transcript);
+  const PART_LIMIT = 300000;
+  const warnings = [];
+  try {
+    let sourceLabel = 'TRANSCRIPT ĐẦY ĐỦ';
+    let sourceText = fullText;
+    let totalChunks = 1;
+    if (fullText.length > PART_LIMIT) {
+      const pieces = [];
+      for (let offset = 0; offset < fullText.length; offset += PART_LIMIT) pieces.push(fullText.slice(offset, offset + PART_LIMIT));
+      totalChunks = pieces.length;
+      const extracted = [];
+      for (let index = 0; index < pieces.length; index += 1) {
+        progress('llm-run', 5 + index / pieces.length * 55, `Claude đang đọc phần ${index + 1}/${pieces.length} của transcript…`);
+        extracted.push(extractJson(await claudeMessages(message,
+          'Bạn là chuyên viên kiểm kê dữ kiện cuộc họp. Viết tiếng Việt, bám sát bằng chứng, không bịa. Trả về duy nhất JSON.',
+          `Trích xuất dữ kiện từ phần ${index + 1}/${pieces.length} của transcript. Mỗi dữ kiện kèm evidence là mốc thời gian sao chép NGUYÊN VĂN từ đầu dòng transcript (trong ngoặc vuông). Trả về duy nhất JSON theo cấu trúc: ${NOTES_SCHEMA}\n\n${pieces[index]}`)));
+      }
+      sourceLabel = `HỒ SƠ DỮ KIỆN (trích từ toàn bộ ${pieces.length} phần transcript)`;
+      sourceText = JSON.stringify(extracted);
+    }
+    progress('llm-run', 65, 'Claude đang viết biên bản và vẽ sơ đồ…');
+    const prompt = `Tạo biên bản cuộc họp từ ${sourceLabel} bên dưới. ${templateInstructions[message.template] || templateInstructions.meeting}
+Ghi chú định hướng: ${message.context || 'Không có'}
+Từ vựng riêng cần giữ đúng chính tả: ${message.vocabulary || 'Không có'}
+Quy tắc evidence: mỗi mục trong keyPoints, decisions, actions, risks phải kèm 1-3 mốc thời gian sao chép NGUYÊN VĂN từ transcript (chuỗi trong ngoặc vuông đầu dòng, ví dụ "03:15" hoặc "01:02:33"). Không tự chế mốc thời gian. Không bịa dữ kiện.
+Quy tắc mindmap: viết mã Mermaid hợp lệ, thụt lề 2 dấu cách mỗi cấp, mỗi node một dòng, không dùng ký tự đặc biệt ()[]{} trong tên node (trừ node gốc root((...))), tối đa 3 cấp và ~25 node.
+Tên file: ${message.filename}
+Trả về duy nhất JSON hợp lệ theo cấu trúc: ${NOTES_SCHEMA_MM}
+
+${sourceLabel}:
+${sourceText}`;
+    const parsed = extractJson(await claudeMessages(message, 'Bạn là thư ký cuộc họp chuyên nghiệp. Viết tiếng Việt, chính xác, đầy đủ và không suy diễn. Trả về duy nhất JSON hợp lệ.', prompt, 8192));
+    const notes = normalizeNotes(parsed, message.filename);
+    notes.mindmap = typeof parsed.mindmap === 'string' ? parsed.mindmap.trim() : '';
+    const validated = validateNotes(notes, transcript, { totalChunks, processedChunks: totalChunks, warnings });
+    progress('llm-run', 100, 'Biên bản đã hoàn tất.');
+    self.postMessage({ type: 'result', notes: validated, fallback: false, usage: { ...usageTotals } });
+  } catch (error) {
+    const notes = heuristicNotes(transcript, message.filename);
+    const validated = validateNotes(notes, transcript, { totalChunks: 1, processedChunks: 1, warnings: [`Viết biên bản bằng Claude thất bại: ${error.message} — bên dưới là bản trích xuất thô, transcript vẫn đầy đủ.`] });
+    progress('llm-run', 100, 'Đã dùng chế độ trích xuất thô.');
+    self.postMessage({ type: 'result', notes: validated, fallback: true, usage: { ...usageTotals } });
+  }
+}
+
+async function askClaude(message) {
+  try {
+    const transcript = message.transcript || [];
+    const fullText = transcriptText(transcript);
+    const contextText = fullText.length <= 150000 ? fullText : transcriptText(relevantSegments(transcript, message.question, 40));
+    const answer = (await claudeMessages(message,
+      'Bạn là trợ lý hỏi đáp cuộc họp. Trả lời ngắn gọn bằng tiếng Việt, chỉ dựa trên transcript được cung cấp. Nếu không đủ bằng chứng, nói rõ "Không tìm thấy trong bản ghi". Mỗi nhận định quan trọng kèm mốc thời gian dạng [MM:SS] hoặc [HH:MM:SS] sao chép từ transcript.',
+      `CÂU HỎI: ${message.question}\n\nTRANSCRIPT:\n${contextText}`, 2048)).trim();
+    const references = [...answer.matchAll(/\[(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\]/g)].map(match => (Number(match[1]) || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]));
+    self.postMessage({ type: 'answer', answer: answer || 'Không tìm thấy trong bản ghi.', references: [...new Set(references)] });
+  } catch (error) {
+    self.postMessage({ type: 'answer', answer: `Không hỏi được Claude: ${error.message}`, references: [] });
   }
 }
 
@@ -594,10 +761,6 @@ self.onmessage = async event => {
     if (event.data?.type === 'summarize') await summarize(event.data);
     if (event.data?.type === 'ask') await ask(event.data);
   } catch (error) {
-    if (transcriber) await transcriber.dispose().catch(() => {});
-    if (generator) await generator.dispose().catch(() => {});
-    transcriber = null;
-    generator = null;
-    self.postMessage({ type: 'error', error: error.message || 'Không thể chạy AI trong trình duyệt.' });
+    self.postMessage({ type: 'error', error: error.message || 'Không thể xử lý qua OpenAI.' });
   }
 };

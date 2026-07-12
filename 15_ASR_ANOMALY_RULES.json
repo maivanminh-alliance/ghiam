@@ -1,0 +1,89 @@
+{
+  "version": "1.0.0",
+  "purpose": "Machine-readable ASR anomaly detection and rescue policy",
+  "thresholds": {
+    "segmentLowConfidence": 0.6,
+    "highRiskFactMinimumConfidence": 0.8,
+    "longSegmentSeconds": 20,
+    "longAnomalySeconds": 30,
+    "exactDuplicateMinimumCount": 3,
+    "exactDuplicateLongTextMinimumCharacters": 24,
+    "repeatedGroupMinimumSeconds": 30,
+    "maximumUnresolvedAnomalyRateForRelease": 0.03,
+    "minimumAudioCoverageForRelease": 0.98
+  },
+  "domainAnomalyPatterns": [
+    {
+      "id": "youtube_promotion",
+      "regex": "subscribe|đăng\\s*ký\\s*kênh|ủng\\s*hộ\\s*kênh|ghiền\\s*mì\\s*gõ",
+      "caseInsensitive": true,
+      "action": "quarantine_and_rescue"
+    },
+    {
+      "id": "entertainment_out_of_context",
+      "regex": "không\\s*bỏ\\s*lỡ\\s*(những\\s*)?video|nhận\\s*thêm\\s*những\\s*bộ\\s*phim",
+      "caseInsensitive": true,
+      "action": "quarantine_and_rescue"
+    }
+  ],
+  "highRiskPatterns": [
+    "tiền|triệu|tỷ|nghìn|đồng|%|phần trăm",
+    "hợp đồng|phụ lục|tạm ứng|thanh toán|quyết toán|đơn giá|khối lượng",
+    "ngày|tuần|tháng|deadline|hạn|cam kết|bàn giao",
+    "B[0-9]+|C[0-9]+|A[0-9]+|RFI|PO|VO|NCR",
+    "nhân lực|nhân công|công nhân|người",
+    "phê duyệt|thống nhất|chốt|đồng ý|quyết định"
+  ],
+  "detectors": [
+    "confidence_below_threshold",
+    "exact_duplicate_across_distant_timestamps",
+    "near_duplicate_repetition",
+    "long_low_information_segment",
+    "domain_mismatch_with_neighboring_topics",
+    "high_risk_fact_without_evidence",
+    "timestamp_gap",
+    "speaker_missing_or_conflicting"
+  ],
+  "rescuePipeline": [
+    {
+      "step": 1,
+      "operation": "extract_original_audio_window",
+      "paddingSeconds": 5
+    },
+    {
+      "step": 2,
+      "operation": "retranscribe_independently",
+      "initialPrompt": false,
+      "carryContext": false
+    },
+    {
+      "step": 3,
+      "operation": "retry_with_alternative_configuration_or_model"
+    },
+    {
+      "step": 4,
+      "operation": "compare_transcripts_and_keep_only_supported_spans"
+    },
+    {
+      "step": 5,
+      "operation": "human_review_when_unresolved"
+    }
+  ],
+  "allowedStatuses": [
+    "raw",
+    "quarantined",
+    "rescue_pending",
+    "rescued_supported",
+    "human_review_required",
+    "verified",
+    "rejected"
+  ],
+  "prohibitedActions": [
+    "delete_raw_transcript",
+    "auto_delete_by_keyword_only",
+    "use_unverified_anomaly_for_summary",
+    "use_unverified_anomaly_for_decision",
+    "use_unverified_anomaly_for_action_item",
+    "silently_replace_raw_with_rescue_result"
+  ]
+}

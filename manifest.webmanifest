@@ -1,7 +1,7 @@
 {
-  "name": "MeetingMind Local",
+  "name": "MeetingMind",
   "short_name": "MeetingMind",
-  "description": "Chuyển bản ghi âm thành biên bản bằng AI chạy trong trình duyệt.",
+  "description": "Chuyển bản ghi âm thành biên bản họp bằng OpenAI API.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

@@ -1,47 +1,30 @@
-# MeetingMind Local — GitHub Pages
+# MeetingMind Enterprise V9 — luồng backend công ty (schema 3.1)
 
-Website tĩnh dùng Transformers.js để chạy Whisper và Qwen ngay trong trình duyệt. Không cần máy chủ ứng dụng và không gọi API trả phí.
+Website tĩnh (GitHub Pages). Ba bộ máy AI chọn trong tab Cài đặt:
 
-## Đưa lên GitHub Pages
+- **Backend công ty (mặc định)**: không cần API key trong máy. Luồng 2 bước theo yêu cầu doanh nghiệp:
+  `Audio → POST /transcribe (gpt-4o-transcribe-diarize) → người dùng sửa/xác nhận tên người nói → POST /analyze-transcript (gpt-5.6-sol) → BẢN NHÁP AI → 2 cổng duyệt → phê duyệt → xuất DOCX/PDF`.
+  Chọn công ty **Alliance** (mặc định, dự án/công trường) hoặc **G.S Việt Nam** (nhân sự/chiến lược).
+- **Gemini + Claude**: cần key Gemini + Claude, phiên âm 1 lần cả file.
+- **OpenAI**: cần key OpenAI.
 
-1. Tạo repository GitHub mới.
-2. Đưa toàn bộ file trong thư mục này vào thư mục gốc của repository.
-3. Vào **Settings → Pages**.
-4. Chọn **Deploy from a branch**, branch `main`, thư mục `/ (root)`.
-5. Mở đường dẫn GitHub Pages được cấp.
+Backend production (không sửa, không đổi URL): `https://meetingmind-openai-backend.meetingmind-minh.workers.dev`
 
-Không mở `index.html` bằng `file://`, vì Web Worker và model AI cần website chạy qua HTTPS/localhost.
+## Bảo mật
+- KHÔNG có OpenAI key trong HTML/JS/localStorage — backend giữ key.
+- Backend có domain allowlist: chỉ origin được cấu hình mới gọi được (localhost/origin lạ bị 403). Phải thêm origin GitHub Pages của bạn vào allowlist của Worker.
+- Không lưu mẫu giọng, không tạo voiceprint.
 
-## Cách hoạt động
+## Quy trình kiểm duyệt (AI KHÔNG tự duyệt)
+1. AI trả bản nháp `ai_draft`, `officialExportAllowed=false`.
+2. Người dùng xử lý hàng chờ xác minh (tab Xác minh): nghe lại, cứu hộ (/rescue), xác nhận/từ chối.
+3. Tick 2 cổng: (1) đã review anomaly/dữ kiện nhạy cảm, (2) đã review tổng thể; nhập người duyệt.
+4. Đủ điều kiện → mở "Phê duyệt & xuất chính thức".
+5. Sửa tên/nội dung hoặc đổi công ty sau duyệt → tự chuyển "Cần duyệt lại"/"Cần phân tích lại".
 
-- Whisper ONNX tạo transcript tiếng Việt trong trình duyệt.
-- File M4A/MP4 dài được xử lý cuốn chiếu: MP4Box đọc lát 2 MB, WebCodecs giải mã 10 phút, Whisper phiên âm, sau đó giải phóng phần đó khỏi RAM.
-- Qwen2.5 0.5B Q4 đọc lần lượt 100% transcript theo nhiều khối, hợp nhất bằng chứng rồi tạo tóm tắt, quyết định và đầu việc.
-- WebGPU được dùng khi trình duyệt hỗ trợ; WASM là chế độ dự phòng.
-- Mô hình được tải từ Hugging Face ở lần dùng đầu và lưu trong bộ nhớ đệm của từng trình duyệt.
-- File âm thanh không được tải lên máy chủ MeetingMind.
+## Xuất file
+- DOCX thật (.docx OOXML, bộ ghi ZIP nội bộ), PDF (in trình duyệt), CSV (action+risk), SVG (mind map), MD/TXT/SRT/JSON.
+- Bản nháp có watermark "BẢN NHÁP AI — CHƯA PHÊ DUYỆT"; bản chính thức có người duyệt + thời điểm + phiên bản.
 
-## Tính năng trợ lý ghi âm chuyên nghiệp
-
-- Tải file hoặc ghi âm trực tiếp bằng micro.
-- Auto generation và Custom generation theo ngôn ngữ, chất lượng, mẫu và từ vựng riêng.
-- 8 mẫu biên bản: cuộc họp, điều hành, dự án, bán hàng, phỏng vấn, bài giảng, brainstorm và tùy chỉnh.
-- Chỉnh nhãn người nói thủ công theo từng đoạn transcript.
-- Tìm kiếm transcript và phát lại từ timestamp.
-- Đánh dấu thời điểm quan trọng kèm ghi chú.
-- Tóm tắt, quyết định, đầu việc và mind map.
-- Hỏi AI dựa trên transcript, kèm mốc thời gian tham chiếu.
-- Hiển thị độ bao phủ transcript, mốc bằng chứng và cảnh báo kết luận độ tin cậy thấp.
-- Thư viện biên bản cục bộ trên từng trình duyệt.
-- Xuất Markdown, TXT, SRT, Project JSON, PDF và Web Share.
-
-## Giới hạn
-
-- Lần đầu cần tải từ vài trăm MB đến hơn 1 GB tùy chế độ.
-- Bản ghi M4A dài nên chạy bằng Chrome hoặc Edge mới; sau khi cập nhật file trên GitHub Pages, hãy tải lại trang hai lần để service worker nhận bản mới.
-- File từ 45 phút tự chuyển sang Whisper Tiny để tránh giật, lag hoặc văng tab. Đây là chế độ bắt buộc cho bản chạy hoàn toàn trong trình duyệt.
-- Trên iPhone, chỉ các phiên bản iOS/WebKit có AudioDecoder mới chạy được AAC cục bộ; nếu không, hãy chuyển file sang MacBook để xử lý đầy đủ.
-- iPhone/iPad chỉ cho phép phân tích cục bộ file tối đa 8 phút. File dài phải xử lý trên MacBook, sau đó xuất Project JSON để nhập và xem trên iPhone.
-- Bản V4 gắn số phiên bản vào CSS/JS/worker, đồng thời dùng service worker network-first để không bị kẹt mã cũ sau khi cập nhật GitHub Pages.
-- Điện thoại cũ có thể chậm hoặc thiếu bộ nhớ; nên dùng chế độ **Nhanh**.
-- Tách người nói chính xác chưa khả dụng trong bản chạy hoàn toàn trong trình duyệt.
+## Deploy
+Đưa toàn bộ file lên GitHub Pages; tải lại 2 lần sau cập nhật (service worker network-first, cache v14). Thêm origin GitHub Pages vào allowlist backend.
