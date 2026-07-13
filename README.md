@@ -1,5 +1,14 @@
 # MeetingMind Enterprise V9 — luồng backend công ty (schema 3.1)
 
+## Bản sửa 9.0.1 — file M4A lớn
+
+- Khắc phục lỗi `Audio file might be corrupted or unsupported` khi gửi file Voice Memos khoảng 60 MB.
+- OpenAI Audio API giới hạn 25 MB mỗi file; ứng dụng không còn gửi nguyên file lớn.
+- M4A lớn được giải mã cuốn chiếu thành WAV mono 16 kHz, mỗi phần 10 phút khoảng 19,2 MB, rồi gửi tuần tự tới backend.
+- Không cắt byte thô của M4A nên mỗi phần vẫn là file âm thanh hợp lệ.
+- Timestamp được cộng offset và ghép lại theo toàn bộ cuộc họp.
+- Speaker của mỗi phần được tách phạm vi (`Phần 1 · ...`) vì nhãn diarization giữa các request không bảo đảm là cùng một người. Người dùng xác nhận tên trước khi phân tích.
+
 Website tĩnh (GitHub Pages). Ba bộ máy AI chọn trong tab Cài đặt:
 
 - **Backend công ty (mặc định)**: không cần API key trong máy. Luồng 2 bước theo yêu cầu doanh nghiệp:
@@ -27,4 +36,4 @@ Backend production (không sửa, không đổi URL): `https://meetingmind-opena
 - Bản nháp có watermark "BẢN NHÁP AI — CHƯA PHÊ DUYỆT"; bản chính thức có người duyệt + thời điểm + phiên bản.
 
 ## Deploy
-Đưa toàn bộ file lên GitHub Pages; tải lại 2 lần sau cập nhật (service worker network-first, cache v14). Thêm origin GitHub Pages vào allowlist backend.
+Đưa toàn bộ file lên GitHub Pages; tải lại 2 lần sau cập nhật (service worker network-first, cache v15). Origin `https://maivanminh-alliance.github.io` đã được backend cho phép.

@@ -3,6 +3,7 @@ import * as MP4BoxModule from 'https://cdn.jsdelivr.net/npm/mp4box@0.5.2/+esm';
 const createMp4File = () => (MP4BoxModule.default || MP4BoxModule).createFile();
 
 const API_BASE = 'https://api.openai.com/v1';
+const ENTERPRISE_BACKEND = 'https://meetingmind-openai-backend.meetingmind-minh.workers.dev';
 const usageTotals = { inputTokens: 0, outputTokens: 0 };
 
 function progress(phase, value, detail = '') {
@@ -93,6 +94,65 @@ async function transcribeBlob(blob, filename, message) {
     }
     throw error;
   }
+}
+
+async function enterpriseTranscribeBlob(blob, filename) {
+  const form = new FormData();
+  form.append('file', blob, filename);
+  let response;
+  try {
+    response = await fetch(`${ENTERPRISE_BACKEND}/transcribe`, { method: 'POST', body: form });
+  } catch {
+    throw new Error('Không kết nối được backend khi gửi phần âm thanh. Kiểm tra mạng rồi thử lại.');
+  }
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = payload?.error || payload?.message || `HTTP ${response.status}`;
+    throw new Error(`Backend không phiên âm được phần âm thanh: ${String(detail).slice(0, 500)}`);
+  }
+  if (!Array.isArray(payload?.transcript)) throw new Error('Backend trả transcript phần âm thanh không hợp lệ.');
+  return payload;
+}
+
+function appendEnterpriseChunkRows(target, rows, offsetSeconds, chunkIndex) {
+  for (const row of rows || []) {
+    const text = String(row?.text || '').trim();
+    if (!text) continue;
+    const rawSpeaker = String(row.originalSpeaker || row.speaker || 'Người nói chưa xác định');
+    // Diarization có thể đánh lại SPEAKER_00 ở mỗi request. Gắn số phần để tránh
+    // tự đồng nhất nhầm hai người; người dùng sẽ gán cùng tên nếu đúng là một người.
+    const scopedSpeaker = `Phần ${chunkIndex + 1} · ${rawSpeaker}`;
+    const start = offsetSeconds + (Number(row.start) || 0);
+    const end = offsetSeconds + Math.max(Number(row.end) || 0, Number(row.start) || 0);
+    target.push({
+      ...row,
+      id: target.length + 1,
+      start,
+      end,
+      time: formatClock(start),
+      speaker: scopedSpeaker,
+      originalSpeaker: scopedSpeaker,
+      sourceChunk: chunkIndex + 1,
+      sourceSpeaker: rawSpeaker,
+    });
+  }
+}
+
+async function transcribeEnterpriseLarge(message) {
+  if (!message.file) throw new Error('Thiếu file M4A để xử lý theo từng phần.');
+  const transcript = [];
+  await decodeM4a(message.file, async (audio, index, total) => {
+    const offset = index * 600;
+    const blob = wavBlob(audio);
+    progress('asr-run', 4 + index / Math.max(1, total) * 92, `Đang gửi phần ${index + 1}/${total} (${formatClock(offset)}–${formatClock(offset + audio.length / 16000)}) tới backend…`);
+    // WAV mono 16 kHz 10 phút ~19,2 MB, nằm dưới giới hạn 25 MB của Audio API.
+    const data = await enterpriseTranscribeBlob(blob, `meeting-part-${index + 1}.wav`);
+    appendEnterpriseChunkRows(transcript, data.transcript, offset, index);
+  });
+  transcript.sort((a, b) => a.start - b.start);
+  if (!transcript.some(row => row.text)) throw new Error('Backend không tạo được transcript từ các phần âm thanh.');
+  progress('asr-run', 100, 'Đã phiên âm xong toàn bộ các phần.');
+  self.postMessage({ type: 'enterprise-transcript', transcript, chunked: true });
 }
 
 const speakerNames = new Map();
@@ -757,6 +817,7 @@ async function askClaude(message) {
 
 self.onmessage = async event => {
   try {
+    if (event.data?.type === 'enterprise-transcribe-large') await transcribeEnterpriseLarge(event.data);
     if (event.data?.type === 'transcribe') await transcribe(event.data);
     if (event.data?.type === 'summarize') await summarize(event.data);
     if (event.data?.type === 'ask') await ask(event.data);

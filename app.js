@@ -1,13 +1,13 @@
-import { compileRules, buildNormalizationSuggestions, buildVerificationQueue, computeGate, stripUnverifiedEvidence } from './guardrails.js?v=9.0.0';
-import { exportDocx, exportPdf, exportCsv, exportSvg, buildReportBlocks } from './exporters.js?v=9.0.0';
-import { ORGANIZATIONS, ORG_HINTS, checkHealth, validateHealth, transcribeFile, analyzeTranscript, rescueSegment, uniqueSpeakers, applySpeakerMap, parseEvidenceSeconds, evidenceLabel } from './enterprise-flow.js?v=9.0.0';
+import { compileRules, buildNormalizationSuggestions, buildVerificationQueue, computeGate, stripUnverifiedEvidence } from './guardrails.js?v=9.0.1';
+import { exportDocx, exportPdf, exportCsv, exportSvg, buildReportBlocks } from './exporters.js?v=9.0.1';
+import { ORGANIZATIONS, ORG_HINTS, checkHealth, validateHealth, transcribeFile, analyzeTranscript, rescueSegment, uniqueSpeakers, applySpeakerMap, parseEvidenceSeconds, evidenceLabel } from './enterprise-flow.js?v=9.0.1';
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
 const HISTORY_KEY = 'meetingmind_pro_history_v1';
 const SETTINGS_KEY = 'meetingmind_openai_settings_v1';
 const API_KEY_STORAGE = 'meetingmind_openai_key';
-const APP_VERSION = '9.0.0';
+const APP_VERSION = '9.0.1';
 const GEMINI_KEY_STORAGE = 'meetingmind_gemini_key';
 const CLAUDE_KEY_STORAGE = 'meetingmind_claude_key';
 const SEGMENT_MS = 10 * 60 * 1000;
@@ -362,16 +362,50 @@ async function runEnterpriseTranscribe() {
   try { health = await checkHealth(); } catch (error) { throw new Error(`Không gọi được backend /health: ${error.message}`); }
   const valid = validateHealth(health);
   if (!valid.ok) throw new Error(valid.reason);
+  if (!state.recordSession) state.duration = state.duration || await ensureAudioDuration();
+
+  // Audio API giới hạn 25 MB. M4A lớn phải được giải mã cuốn chiếu thành WAV
+  // 10 phút hợp lệ trong Worker; tuyệt đối không cắt byte thô của container M4A.
+  if (!state.recordSession && state.file?.size > DIRECT_UPLOAD_LIMIT) {
+    const isM4a = /\.(m4a|mp4|aac)$/iu.test(state.file.name || '') || /mp4|aac/iu.test(state.file.type || '');
+    if (!isM4a) throw new Error('File lớn hơn 24 MB. Hãy dùng M4A từ iPhone để ứng dụng có thể chia thành các phần âm thanh hợp lệ.');
+    setProgress(6, 'Đang chuẩn bị file M4A dài…', `${bytes(state.file.size)} sẽ được xử lý theo các phần 10 phút, không nạp toàn bộ vào RAM.`, 1);
+    createWorker().postMessage({ type: 'enterprise-transcribe-large', file: state.file, filename: state.file.name });
+    return;
+  }
+
+  if (state.recordSession && state.playback?.length) {
+    const mergedTranscript = [];
+    for (let index = 0; index < state.playback.length; index += 1) {
+      const item = state.playback[index];
+      if (item.blob.size > DIRECT_UPLOAD_LIMIT) throw new Error(`Phần ghi âm ${index + 1} vượt 24 MB. Hãy rút ngắn thời lượng mỗi phần ghi.`);
+      setProgress(10 + index / state.playback.length * 30, 'Đang phiên âm bản ghi theo từng phần…', `Phần ${index + 1}/${state.playback.length}.`, 2);
+      const result = await transcribeFile(new File([item.blob], `recording-part-${index + 1}.${/webm/iu.test(item.mimeType || '') ? 'webm' : 'm4a'}`, { type: item.mimeType || 'audio/webm' }));
+      const offsetSeconds = Number(item.offset) || 0;
+      for (const row of result.transcript) {
+        const rawSpeaker = String(row.originalSpeaker || row.speaker || 'Người nói chưa xác định');
+        const scopedSpeaker = `Phần ${index + 1} · ${rawSpeaker}`;
+        const start = offsetSeconds + (Number(row.start) || 0);
+        mergedTranscript.push({ ...row, id: mergedTranscript.length + 1, start, end: offsetSeconds + Math.max(Number(row.end) || 0, Number(row.start) || 0), time: clock(start), speaker: scopedSpeaker, originalSpeaker: scopedSpeaker, sourceChunk: index + 1, sourceSpeaker: rawSpeaker });
+      }
+    }
+    openSpeakerReview(mergedTranscript);
+    return;
+  }
+
   const audio = await enterpriseAudioBlob();
   if (!audio) throw new Error('Chưa có file âm thanh để phiên âm.');
-  if (!state.recordSession) state.duration = state.duration || await ensureAudioDuration();
   setProgress(12, 'Đang tải file lên backend…', `${bytes(audio.size)} · gpt-4o-transcribe-diarize.`, 1);
   const result = await transcribeFile(audio);
-  if (!result.transcript.length || !result.transcript.some(row => String(row.text || '').trim())) {
+  openSpeakerReview(result.transcript);
+}
+
+function openSpeakerReview(transcript) {
+  if (!Array.isArray(transcript) || !transcript.length || !transcript.some(row => String(row.text || '').trim())) {
     throw new Error('Backend trả transcript rỗng — không thể tiếp tục.');
   }
   setProgress(40, 'Phiên âm xong', 'Chờ bạn xác nhận tên người nói.', 2);
-  state.pendingTranscript = result.transcript.map(row => ({ ...row, originalSpeaker: row.originalSpeaker || row.speaker }));
+  state.pendingTranscript = transcript.map(row => ({ ...row, originalSpeaker: row.originalSpeaker || row.speaker }));
   state.documentStatus = 'speaker_review';
   state.speakerMap = {};
   renderSpeakerReview();
@@ -467,6 +501,14 @@ function handleWorkerMessage(event) {
     if (message.phase === 'audio-decode') setProgress(10 + message.value * .25, 'Đang giải mã và gửi cuốn chiếu…', message.detail || 'Chuẩn bị âm thanh 16 kHz.', 2);
     if (message.phase === 'asr-run') setProgress(12 + message.value * .58, 'Đang phiên âm qua OpenAI…', message.detail || 'Whisper đang nghe và tách người nói.', 2);
     if (message.phase === 'llm-run') setProgress(72 + message.value * .27, 'GPT đang viết biên bản…', message.detail || 'Trích xuất quyết định, rủi ro và đầu việc.', 3);
+    return;
+  }
+  if (message.type === 'enterprise-transcript') {
+    try {
+      if (state.worker) state.worker.terminate();
+      state.worker = null;
+      openSpeakerReview(message.transcript);
+    } catch (error) { handleFailure(error); }
     return;
   }
   if (message.type === 'transcript') {
