@@ -76,7 +76,8 @@ main{max-width:680px;margin:auto;padding:8px 0 40px}
 .row-select{margin-left:auto;display:flex;align-items:center;gap:4px;color:var(--muted)}
 .row-select select{
   appearance:none;-webkit-appearance:none;border:0;background:transparent;color:var(--muted);
-  font-size:16px;text-align:right;direction:rtl;padding:6px 0;max-width:220px;cursor:pointer;
+  font-size:16px;text-align:right;padding:6px 0;max-width:240px;cursor:pointer;
+  text-overflow:ellipsis;
 }
 .row-select select:focus{outline:none}
 .row-select .chevron{font-size:13px}
@@ -364,3 +365,18 @@ body{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
 .sample-line span{color:var(--blue);font-weight:600;font-variant-numeric:tabular-nums;margin-right:6px}
 .export-note{font-size:12px;color:var(--orange);margin:0 0 10px}
 #gateSlot:empty{display:none}
+
+/* ---------- V9.1: trạng thái xử lý thật + mind map SVG thuần ---------- */
+.processing-live{margin-bottom:8px;text-align:left}
+.processing-live .row-body b{font-size:15px;font-variant-numeric:tabular-nums}
+.processing-live .row-body small{white-space:normal}
+.live-dot{flex:none;width:10px;height:10px;border-radius:50%;background:var(--green);animation:livepulse 1.6s ease-in-out infinite}
+@keyframes livepulse{50%{opacity:.35}}
+.processing-live.is-waiting .live-dot{background:var(--orange)}
+.processing-live.is-waiting .row-body b{color:var(--orange)}
+.mindmap-tools{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.mindmap-actions{display:flex;gap:6px}
+.mindmap-actions .pill-button{min-height:30px;font-size:13px;padding:0 12px}
+.mindmap-scroll{overflow:auto;-webkit-overflow-scrolling:touch;border:.5px solid var(--sep);border-radius:12px;background:var(--fill)}
+.mindmap-scroll svg{display:block}
+@media print{.mindmap-tools{display:none!important}.mindmap-scroll{border:0;overflow:visible}}

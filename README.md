@@ -1,5 +1,22 @@
 # MeetingMind Enterprise V9 — luồng backend công ty (schema 3.1)
 
+## Bản sửa 9.1.0 — mind map cây SVG thuần + đồng bộ phiên bản
+
+- Đồng bộ toàn bộ phiên bản 9.1.0 (index.html trước đó trỏ ?v=9.0.0 trong khi app.js/sw.js là 9.0.2 → service worker cache lệch file).
+- Khôi phục khối "trạng thái xử lý thật" (đồng hồ chạy, chấm nhấp nháy, thời điểm tín hiệu gần nhất) bị thiếu trong index.html — trước đó app.js 9.0.2 ghi vào các phần tử không tồn tại.
+- Mind map vẽ dạng CÂY bằng SVG thuần ngay trong app (root → nhánh màu → lá), không còn tải Mermaid từ CDN → hoạt động cả offline/PWA. Hỗ trợ 3 nguồn: mindMap object của backend, mã Mermaid `mindmap` (tự parse), fallback từ điểm chính/quyết định/đầu việc/rủi ro.
+- Xuất SVG luôn hoạt động (không cần mở tab Mind map trước) và thêm xuất PNG (2x, nền sáng) để chèn vào Word/Zalo.
+- Sửa lỗi tìm kiếm transcript khi từ khóa chứa ký tự & < > " '.
+- Icon iPhone chuẩn (apple-touch-icon 180px, favicon SVG, icon 512 maskable) + manifest màu iOS.
+- Service worker cache v17.
+
+## Bản sửa 9.0.2 — hiển thị trạng thái xử lý thật
+
+- Màn hình xử lý có đồng hồ chạy từng giây, chấm trạng thái nhấp nháy và thời điểm nhận tín hiệu gần nhất.
+- Khi chờ OpenAI xử lý từng phần 10 phút, Worker gửi heartbeat 5 giây/lần để phân biệt đang chạy với treo.
+- Từ 10 phút chưa có kết quả, trạng thái chuyển sang "đang chờ lâu hơn bình thường".
+- Sau 20 phút không có phản hồi cho một phần, ứng dụng dừng và báo lỗi rõ; không tự gửi lại để tránh tính phí trùng.
+
 ## Bản sửa 9.0.1 — file M4A lớn
 
 - Khắc phục lỗi `Audio file might be corrupted or unsupported` khi gửi file Voice Memos khoảng 60 MB.
@@ -36,4 +53,4 @@ Backend production (không sửa, không đổi URL): `https://meetingmind-opena
 - Bản nháp có watermark "BẢN NHÁP AI — CHƯA PHÊ DUYỆT"; bản chính thức có người duyệt + thời điểm + phiên bản.
 
 ## Deploy
-Đưa toàn bộ file lên GitHub Pages; tải lại 2 lần sau cập nhật (service worker network-first, cache v15). Origin `https://maivanminh-alliance.github.io` đã được backend cho phép.
+Đưa toàn bộ file lên GitHub Pages; tải lại 2 lần sau cập nhật (service worker network-first, cache v16). Origin `https://maivanminh-alliance.github.io` đã được backend cho phép.

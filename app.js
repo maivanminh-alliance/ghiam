@@ -1,13 +1,13 @@
-import { compileRules, buildNormalizationSuggestions, buildVerificationQueue, computeGate, stripUnverifiedEvidence } from './guardrails.js?v=9.0.1';
-import { exportDocx, exportPdf, exportCsv, exportSvg, buildReportBlocks } from './exporters.js?v=9.0.1';
-import { ORGANIZATIONS, ORG_HINTS, checkHealth, validateHealth, transcribeFile, analyzeTranscript, rescueSegment, uniqueSpeakers, applySpeakerMap, parseEvidenceSeconds, evidenceLabel } from './enterprise-flow.js?v=9.0.1';
+import { compileRules, buildNormalizationSuggestions, buildVerificationQueue, computeGate, stripUnverifiedEvidence } from './guardrails.js?v=9.1.0';
+import { exportDocx, exportPdf, exportCsv, buildReportBlocks } from './exporters.js?v=9.1.0';
+import { ORGANIZATIONS, ORG_HINTS, checkHealth, validateHealth, transcribeFile, analyzeTranscript, rescueSegment, uniqueSpeakers, applySpeakerMap, parseEvidenceSeconds, evidenceLabel } from './enterprise-flow.js?v=9.1.0';
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
 const HISTORY_KEY = 'meetingmind_pro_history_v1';
 const SETTINGS_KEY = 'meetingmind_openai_settings_v1';
 const API_KEY_STORAGE = 'meetingmind_openai_key';
-const APP_VERSION = '9.0.1';
+const APP_VERSION = '9.1.0';
 const GEMINI_KEY_STORAGE = 'meetingmind_gemini_key';
 const CLAUDE_KEY_STORAGE = 'meetingmind_claude_key';
 const SEGMENT_MS = 10 * 60 * 1000;
@@ -28,6 +28,8 @@ const state = {
   // Enterprise V3.1 (backend hai bước)
   organization: 'Alliance', pendingTranscript: [], speakerMap: {}, documentStatus: '', officialExportAllowed: false,
   humanReview: null, backendNotes: null, analysisUsage: null, gateAnomaly: false, gateFull: false, approved: false,
+  approvedBy: '', approvedAt: '', approvalNote: '',
+  processingTimer: null, processingStartedAt: 0, progressLastSignalAt: 0,
 };
 
 function escapeHtml(value = '') { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]); }
@@ -125,12 +127,34 @@ function setProgress(percent, title, copy, stage = 1) {
   p = Math.max(p, state.lastProgress); state.lastProgress = p;
   $('#progressNumber').textContent = `${p}%`; $('#progressRing').style.setProperty('--p', p); $('#progressBar').style.width = `${p}%`;
   if (title) $('#progressTitle').textContent = title; if (copy) $('#progressCopy').textContent = copy;
+  state.progressLastSignalAt = Date.now();
   ['stageAudio', 'stageTranscript', 'stageNotes'].forEach((id, index) => { const el = $(`#${id}`); el.classList.toggle('done', index + 1 < stage); el.classList.toggle('active', index + 1 === stage); });
+}
+function stopProcessingHeartbeat() {
+  if (state.processingTimer) clearInterval(state.processingTimer);
+  state.processingTimer = null;
+}
+function startProcessingHeartbeat() {
+  stopProcessingHeartbeat();
+  state.processingStartedAt = Date.now();
+  state.progressLastSignalAt = Date.now();
+  const live = $('#processingLive');
+  live?.classList.remove('is-waiting');
+  if ($('#processingLiveText')) $('#processingLiveText').textContent = 'Trang vẫn hoạt động';
+  const tick = () => {
+    const elapsed = Math.max(0, Math.floor((Date.now() - state.processingStartedAt) / 1000));
+    const sinceSignal = Math.max(0, Math.floor((Date.now() - state.progressLastSignalAt) / 1000));
+    if ($('#processingElapsed')) $('#processingElapsed').textContent = clock(elapsed);
+    if ($('#processingSignal')) $('#processingSignal').textContent = `Tín hiệu xử lý mới nhất: ${sinceSignal < 2 ? 'vừa xong' : `${sinceSignal} giây trước`}`;
+  };
+  tick();
+  state.processingTimer = setInterval(tick, 1000);
 }
 function showView(name) {
   $('#landingView').hidden = name !== 'landing'; $('#processingView').hidden = name !== 'processing'; $('#resultsView').hidden = name !== 'results';
   $('#speakerView').hidden = name !== 'speaker';
   $('#tabbar').hidden = name === 'processing' || name === 'speaker';
+  if (name === 'processing') startProcessingHeartbeat(); else stopProcessingHeartbeat();
   if (name === 'results') { state.appTab = 'notes'; setTabbarActive('notes'); }
   if (name === 'landing') { if (state.appTab === 'notes') state.appTab = 'record'; toggleHomeTabs(state.appTab); setTabbarActive(state.appTab); }
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -138,6 +162,7 @@ function showView(name) {
 function setTabbarActive(name) { $$('#tabbar [data-apptab]').forEach(button => button.classList.toggle('active', button.dataset.apptab === name)); }
 function toggleHomeTabs(which) { $('#tabRecord').hidden = which !== 'record'; $('#tabSettings').hidden = which !== 'settings'; $('#tabNotesEmpty').hidden = which !== 'notesEmpty'; }
 function setAppTab(name) {
+  stopProcessingHeartbeat();
   state.appTab = name;
   if (name === 'notes' && state.notes) { $('#landingView').hidden = true; $('#processingView').hidden = true; $('#resultsView').hidden = false; }
   else {
@@ -500,6 +525,12 @@ function handleWorkerMessage(event) {
     if (message.phase === 'container-read') setProgress(4 + message.value * .06, 'Đang đọc cấu trúc M4A theo từng phần…', message.detail || 'Không nạp toàn bộ file vào RAM.', 1);
     if (message.phase === 'audio-decode') setProgress(10 + message.value * .25, 'Đang giải mã và gửi cuốn chiếu…', message.detail || 'Chuẩn bị âm thanh 16 kHz.', 2);
     if (message.phase === 'asr-run') setProgress(12 + message.value * .58, 'Đang phiên âm qua OpenAI…', message.detail || 'Whisper đang nghe và tách người nói.', 2);
+    if (message.phase === 'asr-wait') {
+      setProgress(12 + message.value * .58, 'Đang phiên âm — trang vẫn hoạt động', message.detail || 'Backend/OpenAI đang xử lý phần âm thanh hiện tại.', 2);
+      const waited = Number(message.waitedSeconds) || 0;
+      $('#processingLive')?.classList.toggle('is-waiting', waited >= 600);
+      if ($('#processingLiveText')) $('#processingLiveText').textContent = waited >= 600 ? 'Đang chờ lâu hơn bình thường' : 'Trang vẫn hoạt động';
+    }
     if (message.phase === 'llm-run') setProgress(72 + message.value * .27, 'GPT đang viết biên bản…', message.detail || 'Trích xuất quyết định, rủi ro và đầu việc.', 3);
     return;
   }
@@ -976,7 +1007,7 @@ function renderResults() {
   $('#summaryPanel').innerHTML = `<div id="gateSlot">${qualityCardHtml()}</div>${coveragePanel}${execTitle}<div class="section-label">Tóm tắt điều hành</div><p class="summary-text">${escapeHtml(notes.summary || 'Chưa có tóm tắt.')}</p><div class="section-label">Điểm chính</div><ul class="notes-list evidence-notes">${(notes.keyPoints || []).map(point => `<li><span>${escapeHtml(factText(point))}</span>${evidenceHtml(point)}</li>`).join('') || '<li>Chưa xác định.</li>'}</ul>${(notes.risks || []).length ? `<div class="section-label section-space">Rủi ro &amp; vướng mắc</div><ul class="notes-list evidence-notes">${notes.risks.map(item => `<li><span>${escapeHtml(factText(item))}</span>${evidenceHtml(item)}</li>`).join('')}</ul>` : ''}${state.images.length ? `<div class="section-label section-space">Tài liệu tham chiếu</div><ul class="notes-list">${state.images.map(file => `<li>Ảnh: ${escapeHtml(file.name)}</li>`).join('')}</ul>` : ''}`;
   renderTranscript();
   $('#decisionsPanel').innerHTML = `<div class="section-label">Các quyết định đã ghi nhận</div><div class="decision-list">${(notes.decisions || []).map((item, i) => `<div class="decision-item${item.confidence === 'low' ? ' low-confidence' : ''}"><b>${String(i + 1).padStart(2, '0')}. ${escapeHtml(factText(item))}</b>${item.context ? `<small>${escapeHtml(item.context)}</small>` : ''}${item.evidenceStatus ? `<span class="ev-tag ev-${escapeHtml(item.evidenceStatus)}">${escapeHtml(item.evidenceStatus)}</span>` : ''}${evidenceHtml(item)}</div>`).join('') || '<p>Chưa ghi nhận quyết định rõ ràng.</p>'}</div>`;
-  $('#actionsPanel').innerHTML = `<div class="section-label">Danh sách việc cần làm</div><div class="action-list">${(notes.actions || []).map(item => `<div class="action-item${item.confidence === 'low' ? ' low-confidence' : ''}"><input type="checkbox" aria-label="Đánh dấu hoàn thành"><span><span class="owner">${escapeHtml(item.owner || 'Chưa xác định')}</span><span class="action-text">${escapeHtml(factText(item))}</span>${item.due && item.due !== 'Chưa xác định' ? '' : ''}${evidenceHtml(item)}</span><span class="due">${escapeHtml(item.due || 'Chưa xác định')}</span></div>`).join('') || '<p>Chưa ghi nhận đầu việc rõ ràng.</p>'}</div>`;
+  $('#actionsPanel').innerHTML = `<div class="section-label">Danh sách việc cần làm</div><div class="action-list">${(notes.actions || []).map(item => `<div class="action-item${item.confidence === 'low' ? ' low-confidence' : ''}"><input type="checkbox" aria-label="Đánh dấu hoàn thành"><span><span class="owner">${escapeHtml(item.owner || 'Chưa xác định')}</span><span class="action-text">${escapeHtml(factText(item))}</span>${evidenceHtml(item)}</span><span class="due">${escapeHtml(item.due || 'Chưa xác định')}</span></div>`).join('') || '<p>Chưa ghi nhận đầu việc rõ ràng.</p>'}</div>`;
   renderTimeline(); renderConflicts(); renderRisksIssues(); renderVerify();
   renderMindMap(); renderAskHistory(); updateHighlightCount(); renderDraftState(); saveHistory(); showView('results');
 }
@@ -1008,7 +1039,12 @@ function renderDraftState() {
 function renderTranscript(query = '') {
   const term = query.trim().toLocaleLowerCase('vi');
   const rows = state.transcript.map((row, i) => {
-    let text = escapeHtml(row.text); if (term && row.text.toLocaleLowerCase('vi').includes(term)) text = text.replace(new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'giu'), '<mark>$1</mark>');
+    let text = escapeHtml(row.text);
+    if (term && row.text.toLocaleLowerCase('vi').includes(term)) {
+      // Tìm trên chuỗi đã escape HTML bằng term cũng đã escape — tránh lệch khi từ khóa chứa & < > " '
+      const escapedTerm = escapeHtml(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      text = text.replace(new RegExp(`(${escapedTerm})`, 'giu'), '<mark>$1</mark>');
+    }
     const highlighted = state.highlights.some(item => Math.abs(item.time - row.start) < 8);
     const anomalous = row.status && row.status !== 'raw' && row.status !== 'verified';
     const badge = anomalous ? `<span class="anom-badge">${STATUS_LABELS[row.status] || row.status}</span>` : '';
@@ -1019,34 +1055,150 @@ function renderTranscript(query = '') {
   $('#transcriptSearch').addEventListener('input', event => renderTranscript(event.target.value));
 }
 
-function renderMindMapBranches() {
-  const notes = state.notes || {};
-  const backendMap = state.v3?.mindMap;
-  const branch = (title, items) => `<section class="mind-branch"><strong>${escapeHtml(title)}</strong><ul>${(items || []).map(item => `<li>${escapeHtml(item.text || item)}</li>`).join('') || '<li>Chưa có dữ liệu</li>'}</ul></section>`;
-  if (backendMap && typeof backendMap === 'object' && Array.isArray(backendMap.branches)) {
-    // Backend trả mindMap {root, branches:[{label, items:[]}]}
-    $('#mindmapPanel').innerHTML = `<div class="mindmap"><div class="mind-root">${escapeHtml(backendMap.root || $('#meetingTitle').value || notes.title)}</div><div class="mind-branches">${backendMap.branches.map(b => branch(b.label || '', b.items)).join('')}</div></div>`;
-    return;
+// ---------- Mind map dạng cây — SVG thuần, không cần CDN, luôn xuất được SVG/PNG ----------
+const MIND_COLORS = ['#007AFF', '#34C759', '#FF9500', '#AF52DE', '#FF2D55', '#5AC8FA', '#FFB300', '#30B0C7'];
+
+// Parse mã Mermaid `mindmap` (thụt đầu dòng) thành cây {label, children}
+function mindTreeFromMermaid(code) {
+  const rows = [];
+  for (const raw of String(code || '').split('\n')) {
+    if (!raw.trim() || /^\s*mindmap\s*$/iu.test(raw) || /^\s*%%/u.test(raw)) continue;
+    const indent = raw.match(/^\s*/u)[0].replace(/\t/gu, '  ').length;
+    const label = raw.trim()
+      .replace(/^root\s*/iu, '')
+      .replace(/^\(\((.+)\)\)$/su, '$1').replace(/^\((.+)\)$/su, '$1')
+      .replace(/^\[(.+)\]$/su, '$1').replace(/^\{\{(.+)\}\}$/su, '$1')
+      .replace(/^"(.+)"$/su, '$1').trim();
+    if (label) rows.push({ indent, label });
   }
-  $('#mindmapPanel').innerHTML = `<div class="mindmap"><div class="mind-root">${escapeHtml($('#meetingTitle').value || notes.title)}</div><div class="mind-branches">${branch('Điểm chính', notes.keyPoints)}${branch('Quyết định', notes.decisions)}${branch('Hành động', notes.actions)}</div></div>`;
+  if (!rows.length) return null;
+  const root = { label: rows[0].label, children: [] };
+  const stack = [{ indent: rows[0].indent, node: root }];
+  for (const row of rows.slice(1)) {
+    const node = { label: row.label, children: [] };
+    while (stack.length > 1 && row.indent <= stack[stack.length - 1].indent) stack.pop();
+    stack[stack.length - 1].node.children.push(node);
+    stack.push({ indent: row.indent, node });
+  }
+  return root;
 }
-async function renderMindMap() {
-  const code = String(state.notes?.mindmap || '').trim();
-  if (!code || !/^mindmap/u.test(code)) { renderMindMapBranches(); return; }
-  $('#mindmapPanel').innerHTML = '<div class="mermaid-wrap" id="mermaidWrap">Đang vẽ sơ đồ…</div>';
-  try {
-    if (!window.__mermaid) {
-      const module = await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs');
-      window.__mermaid = module.default;
-      window.__mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });
-    }
-    const { svg } = await window.__mermaid.render(`mmGraph${Date.now()}`, code);
-    const wrap = $('#mermaidWrap');
-    if (wrap) wrap.innerHTML = svg;
-  } catch (error) {
-    console.warn('Mermaid render:', error);
-    renderMindMapBranches();
+
+// Gom dữ liệu mindmap từ backend (mindMap object) → mã Mermaid → fallback notes
+function buildMindTree() {
+  const notes = state.notes || {};
+  const title = ($('#meetingTitle')?.value || notes.title || 'Cuộc họp').trim() || 'Cuộc họp';
+  const leaf = item => ({ label: String(factText(item) || item?.rawText || '').trim(), children: [] });
+  const backendMap = state.v3?.mindMap;
+  if (backendMap && typeof backendMap === 'object' && Array.isArray(backendMap.branches) && backendMap.branches.length) {
+    return { label: String(backendMap.root || title), children: backendMap.branches.map(b => ({ label: String(b.label || ''), children: (b.items || []).map(leaf).filter(n => n.label) })).filter(b => b.label || b.children.length) };
   }
+  const code = String(notes.mindmap || '').trim();
+  if (/^mindmap/u.test(code)) { const tree = mindTreeFromMermaid(code); if (tree?.children?.length) return tree; }
+  const branch = (label, items) => ({ label, children: (items || []).map(leaf).filter(n => n.label) });
+  const children = [branch('Điểm chính', notes.keyPoints), branch('Quyết định', notes.decisions), branch('Việc cần làm', notes.actions), branch('Rủi ro', notes.risks)].filter(b => b.children.length);
+  return { label: title, children };
+}
+
+function wrapMindLabel(text, max) {
+  const words = String(text).split(/\s+/u).filter(Boolean);
+  const lines = []; let line = '';
+  for (const word of words) {
+    if (line && (line.length + 1 + word.length) > max) { lines.push(line); line = word; }
+    else line = line ? `${line} ${word}` : word;
+  }
+  if (line) lines.push(line);
+  if (lines.length > 5) { lines.length = 5; lines[4] = `${lines[4].slice(0, max - 1)}…`; }
+  return lines.length ? lines : [''];
+}
+
+function layoutMindNode(node, depth) {
+  node.depth = depth;
+  node.lines = wrapMindLabel(node.label, depth === 0 ? 24 : depth === 1 ? 22 : 34);
+  const charW = depth === 0 ? 8.6 : depth === 1 ? 7.6 : 6.6;
+  const longest = Math.max(4, ...node.lines.map(l => l.length));
+  node.w = Math.round(longest * charW) + (depth <= 1 ? 30 : 22);
+  node.h = node.lines.length * 17 + (depth === 0 ? 18 : depth === 1 ? 14 : 10);
+  let childrenH = 0;
+  for (const child of node.children) { layoutMindNode(child, depth + 1); childrenH += child.subH; }
+  childrenH += Math.max(0, node.children.length - 1) * (depth === 0 ? 14 : 7);
+  node.subH = Math.max(node.h, childrenH);
+}
+function positionMindNode(node, x, top) {
+  node.x = x; node.cy = top + node.subH / 2;
+  const gap = node.depth === 0 ? 14 : 7;
+  const childrenH = node.children.reduce((sum, c) => sum + c.subH, 0) + Math.max(0, node.children.length - 1) * gap;
+  let y = top + (node.subH - childrenH) / 2;
+  for (const child of node.children) { positionMindNode(child, x + node.w + 38, y); y += child.subH + gap; }
+}
+
+// Vẽ SVG hoàn chỉnh. theme: 'auto' theo hệ thống (hiển thị trong app), 'light' cho file xuất.
+function mindMapSvg(theme = 'auto') {
+  const tree = buildMindTree();
+  if (!tree.children.length) return '';
+  layoutMindNode(tree, 0);
+  positionMindNode(tree, 14, 14);
+  const dark = theme === 'auto' ? matchMedia('(prefers-color-scheme: dark)').matches : theme === 'dark';
+  const ink = dark ? '#FFFFFF' : '#1C1C1E';
+  const card = dark ? '#2C2C2E' : '#FFFFFF';
+  const cardLine = dark ? 'rgba(255,255,255,.16)' : 'rgba(60,60,67,.20)';
+  const rootBg = dark ? '#0A84FF' : '#007AFF';
+  const font = `-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,sans-serif`;
+  let maxX = 0, maxY = 0;
+  const edges = []; const boxes = [];
+  const esc = value => escapeHtml(value);
+  const walk = (node, color) => {
+    const top = node.cy - node.h / 2;
+    maxX = Math.max(maxX, node.x + node.w); maxY = Math.max(maxY, top + node.h, node.cy + node.subH / 2);
+    node.children.forEach((child, i) => {
+      const branchColor = node.depth === 0 ? MIND_COLORS[i % MIND_COLORS.length] : color;
+      const x1 = node.x + node.w, x2 = child.x, mid = (x1 + x2) / 2;
+      edges.push(`<path d="M${x1} ${node.cy} C ${mid} ${node.cy}, ${mid} ${child.cy}, ${x2} ${child.cy}" fill="none" stroke="${branchColor}" stroke-width="${child.depth === 1 ? 2.2 : 1.4}" stroke-linecap="round" opacity="${child.depth === 1 ? .95 : .55}"/>`);
+      walk(child, branchColor);
+    });
+    const r = node.depth === 0 ? 14 : 10;
+    let fill = card, stroke = cardLine, textFill = ink, weight = 400, size = 12.5;
+    if (node.depth === 0) { fill = rootBg; stroke = 'none'; textFill = '#FFFFFF'; weight = 700; size = 15; }
+    else if (node.depth === 1) { stroke = color; textFill = color; weight = 700; size = 13.5; }
+    const lineH = 17, textY = node.cy - ((node.lines.length - 1) * lineH) / 2;
+    const tspans = node.lines.map((line, i) => `<tspan x="${node.x + node.w / 2}" y="${textY + i * lineH}">${esc(line)}</tspan>`).join('');
+    boxes.push(`<g><rect x="${node.x}" y="${top}" width="${node.w}" height="${node.h}" rx="${r}" fill="${fill}" stroke="${stroke}" stroke-width="${node.depth === 1 ? 1.6 : 1}"/><text text-anchor="middle" dominant-baseline="middle" font-family="${font}" font-size="${size}" font-weight="${weight}" fill="${textFill}">${tspans}</text></g>`);
+  };
+  walk(tree, MIND_COLORS[0]);
+  const width = Math.ceil(maxX + 16), height = Math.ceil(maxY + 16);
+  const bg = theme === 'auto' ? '' : `<rect width="${width}" height="${height}" fill="${dark ? '#000000' : '#F7F7FA'}"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Sơ đồ mind map">${bg}${edges.join('')}${boxes.join('')}</svg>`;
+}
+
+function renderMindMap() {
+  const svg = mindMapSvg('auto');
+  $('#mindmapPanel').innerHTML = svg
+    ? `<div class="mindmap-tools"><span class="section-label" style="margin:0">Sơ đồ cây nội dung</span><span class="mindmap-actions"><button class="pill-button" id="mindmapSvgBtn" type="button">↓ SVG</button><button class="pill-button" id="mindmapPngBtn" type="button">↓ PNG</button></span></div><div class="mindmap-scroll">${svg}</div><p class="empty-note">Kéo ngang để xem toàn bộ sơ đồ. Xuất SVG/PNG để chèn vào báo cáo.</p>`
+    : '<p class="empty-note">Chưa có dữ liệu để vẽ sơ đồ — cần biên bản có điểm chính / quyết định / đầu việc.</p>';
+  $('#mindmapSvgBtn')?.addEventListener('click', () => exportAs('svg'));
+  $('#mindmapPngBtn')?.addEventListener('click', () => exportAs('png'));
+}
+
+// Xuất PNG: SVG (theme sáng) → <img> → canvas 2x → tải về
+async function exportMindPng(base, svgMarkup) {
+  const url = URL.createObjectURL(new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' }));
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = () => reject(new Error('Không đọc được SVG để chuyển PNG.')); img.src = url; });
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#F7F7FA'; g.fillRect(0, 0, canvas.width, canvas.height);
+    g.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const png = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!png) throw new Error('Trình duyệt không tạo được PNG.');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(png);
+    link.download = `${base}.png`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 800);
+  } finally { URL.revokeObjectURL(url); }
 }
 
 function renderAskHistory() {
@@ -1118,7 +1270,8 @@ async function exportAs(type) {
     (state.notes?.risks || []).forEach(item => rows.push(['Risk', factText(item), item.owner || '', '', '', (item.evidence || []).join(' '), item.confidence || '']));
     exportCsv(base, rows);
   }
-  if (type === 'svg') { const svg = $('#mindmapPanel svg'); if (!exportSvg(base, svg)) showError('Chưa có sơ đồ Mermaid để xuất SVG.', 'Mở tab Mind map trước, hoặc dùng engine tạo được mã Mermaid.'); }
+  if (type === 'svg') { const svg = mindMapSvg('light'); if (svg) downloadFile('svg', svg, 'image/svg+xml'); else showError('Chưa có dữ liệu để vẽ sơ đồ mind map.', 'Cần biên bản có điểm chính / quyết định / đầu việc.'); }
+  if (type === 'png') { const svg = mindMapSvg('light'); if (svg) { try { await exportMindPng(base, svg); } catch (error) { showError('Không xuất được PNG.', error.message); } } else showError('Chưa có dữ liệu để vẽ sơ đồ mind map.', 'Cần biên bản có điểm chính / quyết định / đầu việc.'); }
   if (type === 'share') {
     const file = new File([markdown()], `${base}.md`, { type: 'text/markdown' });
     if (navigator.canShare?.({ files: [file] })) await navigator.share({ title: $('#meetingTitle').value, files: [file] }); else downloadFile('md', markdown(), 'text/markdown');

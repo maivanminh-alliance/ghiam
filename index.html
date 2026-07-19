@@ -12,7 +12,9 @@
   <meta name="description" content="Ghi âm cuộc họp tới 10 giờ và chuyển thành biên bản bằng OpenAI — giao diện chuẩn iPhone.">
   <title>MeetingMind</title>
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="styles.css?v=9.0.1">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="styles.css?v=9.1.0">
 </head>
 <body>
   <header class="navbar">
@@ -87,11 +89,11 @@
       <!-- TAB 3: CÀI ĐẶT -->
       <div class="app-tab" id="tabSettings" hidden>
         <h1 class="large-title">Cài đặt</h1>
-        <p class="subtitle">Kết nối OpenAI và tùy chọn tạo biên bản.</p>
+        <p class="subtitle">Chọn bộ máy AI, công ty và tùy chọn tạo biên bản.</p>
 
         <p class="group-header">KẾT NỐI AI <span class="badge" id="apiBadge">THIẾU KEY</span></p>
         <section class="group" id="apiSettings">
-          <label class="row"><span class="row-label">Bộ máy AI</span><span class="row-select"><select id="engineSelect"><option value="enterprise" selected>Backend công ty (khuyên dùng)</option><option value="gemini-claude">Gemini + Claude</option><option value="openai">OpenAI</option></select><span class="chevron">⌄</span></span></label>
+          <label class="row"><span class="row-label">Bộ máy AI</span><span class="row-select"><select id="engineSelect"><option value="enterprise" selected>Backend công ty</option><option value="gemini-claude">Gemini + Claude</option><option value="openai">OpenAI</option></select><span class="chevron">⌄</span></span></label>
           <label class="row" id="rowOrganization"><span class="row-label">Công ty</span><span class="row-select"><select id="organizationSelect"><option value="Alliance" selected>Alliance</option><option value="G.S Việt Nam">G.S Việt Nam</option></select><span class="chevron">⌄</span></span></label>
           <label class="row" id="rowGeminiKey"><span class="row-label">Key Gemini</span><input class="row-input" id="geminiKeyInput" type="password" placeholder="AIza…" autocomplete="off" spellcheck="false"></label>
           <label class="row" id="rowClaudeKey"><span class="row-label">Key Claude</span><input class="row-input" id="claudeKeyInput" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false"></label>
@@ -134,6 +136,15 @@
         <h2 id="progressTitle">Đang chuẩn bị âm thanh…</h2>
         <p class="subtitle center" id="progressCopy">Không đóng app trong khi xử lý.</p>
         <div class="progress-track"><span id="progressBar"></span></div>
+        <div class="group processing-live" id="processingLive">
+          <div class="row">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span class="row-body">
+              <b><span id="processingLiveText">Trang vẫn hoạt động</span> · <time id="processingElapsed">00:00</time></b>
+              <small id="processingSignal">Tín hiệu xử lý mới nhất: vừa xong</small>
+            </span>
+          </div>
+        </div>
         <section class="group stage-list">
           <div class="row" id="stageAudio"><span class="stage-dot"></span>Chuẩn bị âm thanh</div>
           <div class="row" id="stageTranscript"><span class="stage-dot"></span>Phiên âm + tách người nói</div>
@@ -247,7 +258,8 @@
         <button type="button" data-export="docx"><b>DOCX</b><span>Word thật (.docx)</span></button>
         <button type="button" data-export="pdf"><b>PDF</b><span>In / lưu PDF</span></button>
         <button type="button" data-export="csv"><b>CSV</b><span>Action + Risk</span></button>
-        <button type="button" data-export="svg"><b>SVG</b><span>Mind map</span></button>
+        <button type="button" data-export="svg"><b>SVG</b><span>Mind map (vector)</span></button>
+        <button type="button" data-export="png"><b>PNG</b><span>Mind map (ảnh)</span></button>
         <button type="button" data-export="md"><b>Markdown</b><span>Tóm tắt + transcript</span></button>
         <button type="button" data-export="txt"><b>TXT</b><span>Văn bản thuần</span></button>
         <button type="button" data-export="srt"><b>SRT</b><span>Phụ đề timestamp</span></button>
@@ -268,6 +280,6 @@
     <p>Đang ghi âm — chạm 2 lần để quay lại</p>
   </div>
 
-  <script type="module" src="app.js?v=9.0.1"></script>
+  <script type="module" src="app.js?v=9.1.0"></script>
 </body>
 </html>

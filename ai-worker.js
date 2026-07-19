@@ -6,8 +6,8 @@ const API_BASE = 'https://api.openai.com/v1';
 const ENTERPRISE_BACKEND = 'https://meetingmind-openai-backend.meetingmind-minh.workers.dev';
 const usageTotals = { inputTokens: 0, outputTokens: 0 };
 
-function progress(phase, value, detail = '') {
-  self.postMessage({ type: 'progress', phase, value: Math.max(0, Math.min(100, Number(value) || 0)), detail });
+function progress(phase, value, detail = '', meta = {}) {
+  self.postMessage({ type: 'progress', phase, value: Math.max(0, Math.min(100, Number(value) || 0)), detail, ...meta });
 }
 
 function formatClock(seconds) {
@@ -96,13 +96,14 @@ async function transcribeBlob(blob, filename, message) {
   }
 }
 
-async function enterpriseTranscribeBlob(blob, filename) {
+async function enterpriseTranscribeBlob(blob, filename, signal) {
   const form = new FormData();
   form.append('file', blob, filename);
   let response;
   try {
-    response = await fetch(`${ENTERPRISE_BACKEND}/transcribe`, { method: 'POST', body: form });
-  } catch {
+    response = await fetch(`${ENTERPRISE_BACKEND}/transcribe`, { method: 'POST', body: form, signal });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Backend không phản hồi sau 20 phút. Ứng dụng đã dừng phần này để tránh chờ vô hạn; không tự gửi lại để tránh phát sinh phí trùng.');
     throw new Error('Không kết nối được backend khi gửi phần âm thanh. Kiểm tra mạng rồi thử lại.');
   }
   const payload = await response.json().catch(() => null);
@@ -144,10 +145,29 @@ async function transcribeEnterpriseLarge(message) {
   await decodeM4a(message.file, async (audio, index, total) => {
     const offset = index * 600;
     const blob = wavBlob(audio);
-    progress('asr-run', 4 + index / Math.max(1, total) * 92, `Đang gửi phần ${index + 1}/${total} (${formatClock(offset)}–${formatClock(offset + audio.length / 16000)}) tới backend…`);
+    const partProgress = 4 + index / Math.max(1, total) * 92;
+    const partRange = `${formatClock(offset)}–${formatClock(offset + audio.length / 16000)}`;
+    const startedAt = Date.now();
+    progress('asr-run', partProgress, `Đang gửi phần ${index + 1}/${total} (${partRange}) tới backend…`);
+    const heartbeat = () => {
+      const waitedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      const waitNote = waitedSeconds >= 600 ? 'đang chờ lâu hơn bình thường' : 'trang vẫn hoạt động';
+      progress('asr-wait', partProgress, `Phần ${index + 1}/${total} (${partRange}) đang được backend/OpenAI xử lý · đã chờ ${formatClock(waitedSeconds)} · ${waitNote}.`, { waitedSeconds, part: index + 1, totalParts: total });
+    };
+    heartbeat();
+    const heartbeatId = setInterval(heartbeat, 5000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20 * 60 * 1000);
     // WAV mono 16 kHz 10 phút ~19,2 MB, nằm dưới giới hạn 25 MB của Audio API.
-    const data = await enterpriseTranscribeBlob(blob, `meeting-part-${index + 1}.wav`);
-    appendEnterpriseChunkRows(transcript, data.transcript, offset, index);
+    try {
+      const data = await enterpriseTranscribeBlob(blob, `meeting-part-${index + 1}.wav`, controller.signal);
+      const waitedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      progress('asr-wait', partProgress, `Đã nhận kết quả phần ${index + 1}/${total} sau ${formatClock(waitedSeconds)}.`, { waitedSeconds, part: index + 1, totalParts: total });
+      appendEnterpriseChunkRows(transcript, data.transcript, offset, index);
+    } finally {
+      clearInterval(heartbeatId);
+      clearTimeout(timeoutId);
+    }
   });
   transcript.sort((a, b) => a.start - b.start);
   if (!transcript.some(row => row.text)) throw new Error('Backend không tạo được transcript từ các phần âm thanh.');
