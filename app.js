@@ -1,13 +1,13 @@
-import { compileRules, buildNormalizationSuggestions, buildVerificationQueue, computeGate, stripUnverifiedEvidence } from './guardrails.js?v=9.1.0';
-import { exportDocx, exportPdf, exportCsv, buildReportBlocks } from './exporters.js?v=9.1.0';
-import { ORGANIZATIONS, ORG_HINTS, checkHealth, validateHealth, transcribeFile, analyzeTranscript, rescueSegment, uniqueSpeakers, applySpeakerMap, parseEvidenceSeconds, evidenceLabel } from './enterprise-flow.js?v=9.1.0';
+import { compileRules, buildNormalizationSuggestions, buildVerificationQueue, computeGate, stripUnverifiedEvidence } from './guardrails.js?v=9.1.4';
+import { exportDocx, exportPdf, exportCsv, buildReportBlocks } from './exporters.js?v=9.1.4';
+import { ORGANIZATIONS, ORG_HINTS, checkHealth, validateHealth, transcribeFile, analyzeTranscript, rescueSegment, uniqueSpeakers, applySpeakerMap, parseEvidenceSeconds, evidenceLabel } from './enterprise-flow.js?v=9.1.4';
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const $$ = (selector, parent = document) => [...parent.querySelectorAll(selector)];
 const HISTORY_KEY = 'meetingmind_pro_history_v1';
 const SETTINGS_KEY = 'meetingmind_openai_settings_v1';
 const API_KEY_STORAGE = 'meetingmind_openai_key';
-const APP_VERSION = '9.1.0';
+const APP_VERSION = '9.1.4';
 const GEMINI_KEY_STORAGE = 'meetingmind_gemini_key';
 const CLAUDE_KEY_STORAGE = 'meetingmind_claude_key';
 const SEGMENT_MS = 10 * 60 * 1000;
@@ -1172,8 +1172,8 @@ function mindMapSvg(theme = 'auto') {
 function renderMindMap() {
   const svg = mindMapSvg('auto');
   $('#mindmapPanel').innerHTML = svg
-    ? `<div class="mindmap-tools"><span class="section-label" style="margin:0">Sơ đồ cây nội dung</span><span class="mindmap-actions"><button class="pill-button" id="mindmapSvgBtn" type="button">↓ SVG</button><button class="pill-button" id="mindmapPngBtn" type="button">↓ PNG</button></span></div><div class="mindmap-scroll">${svg}</div><p class="empty-note">Kéo ngang để xem toàn bộ sơ đồ. Xuất SVG/PNG để chèn vào báo cáo.</p>`
-    : '<p class="empty-note">Chưa có dữ liệu để vẽ sơ đồ — cần biên bản có điểm chính / quyết định / đầu việc.</p>';
+    ? `<div class="mindmap-tools"><span class="section-label" style="margin:0">Sơ đồ cây</span><span class="mindmap-actions"><button class="pill-button" id="mindmapSvgBtn" type="button">↓ SVG</button><button class="pill-button" id="mindmapPngBtn" type="button">↓ PNG</button></span></div><div class="mindmap-scroll">${svg}</div>`
+    : '<p class="empty-note">Chưa có dữ liệu để vẽ sơ đồ.</p>';
   $('#mindmapSvgBtn')?.addEventListener('click', () => exportAs('svg'));
   $('#mindmapPngBtn')?.addEventListener('click', () => exportAs('png'));
 }

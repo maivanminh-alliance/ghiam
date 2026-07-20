@@ -443,7 +443,7 @@ function normalizeNotes(value, filename) {
     keyPoints: list(notes.keyPoints, 14).map(item => normalizeFactItem(item)).filter(item => item.text),
     decisions: list(notes.decisions, 20).map(item => normalizeFactItem(item, { context: '' })).filter(item => item.text),
     actions: list(notes.actions, 24).map(item => normalizeFactItem(item, { owner: 'Chưa xác định', due: 'Chưa xác định' })).filter(item => item.text),
-    risks: list(notes.risks, 14).map(item => normalizeFactItem(item)).filter(item => item.text),
+    risks: list(notes.risks, 14).map(item => normalizeFactItem(item, { impact: '' })).filter(item => item.text),
   };
 }
 function heuristicNotes(transcript, filename) {
@@ -490,7 +490,7 @@ function transcriptText(rows) { return rows.map(row => `[${row.time}] ${row.spea
 
 // ---------- GPT viết biên bản ----------
 const templateInstructions = {
-  meeting: 'Tạo biên bản chuẩn: mục tiêu, nội dung chính, quyết định và việc cần làm.',
+  meeting: 'Phân tích cuộc họp theo vấn đề: bối cảnh, các vấn đề cốt lõi và nguyên nhân, quyết định kèm lý do, việc cần làm, rủi ro và khuyến nghị.',
   executive: 'Ưu tiên góc nhìn lãnh đạo: kết luận, tác động, rủi ro và quyết định cần phê duyệt.',
   project: 'Ưu tiên tiến độ, mốc bàn giao, vướng mắc, phụ thuộc, rủi ro và chủ sở hữu hành động.',
   sales: 'Ưu tiên nhu cầu khách hàng, pain points, phản đối, cam kết, cơ hội và bước tiếp theo.',
@@ -500,7 +500,10 @@ const templateInstructions = {
   custom: 'Tuân thủ ghi chú định hướng do người dùng cung cấp.',
 };
 
-const NOTES_SCHEMA = '{"title":"tiêu đề ngắn","summary":"tóm tắt điều hành 5-8 câu","keyPoints":[{"text":"điểm chính","evidence":["mốc thời gian"]}],"decisions":[{"text":"quyết định","context":"bối cảnh","evidence":["mốc thời gian"]}],"actions":[{"text":"việc cần làm","owner":"người phụ trách hoặc Chưa xác định","due":"thời hạn hoặc Chưa xác định","evidence":["mốc thời gian"]}],"risks":[{"text":"rủi ro","evidence":["mốc thời gian"]}]}';
+const NOTES_SCHEMA = '{"title":"tiêu đề nêu đúng chủ đề chính của cuộc họp","summary":"PHÂN TÍCH điều hành 6-10 câu theo mạch: bối cảnh & mục đích họp → 2-3 vấn đề cốt lõi (bản chất, nguyên nhân) → quyết định quan trọng nhất và tác động → đánh giá chung về tiến độ/rủi ro → khuyến nghị bước tiếp theo. Văn phong chuyên gia phân tích, KHÔNG chép lại lời nói","keyPoints":[{"text":"nhận định phân tích: vấn đề gì, vì sao quan trọng, ảnh hưởng tới ai/hạng mục nào — diễn đạt bằng lời phân tích, không trích nguyên văn câu nói","evidence":["mốc thời gian"]}],"decisions":[{"text":"quyết định ĐÃ CHỐT (không lẫn với việc còn tranh luận)","context":"lý do chốt + điều kiện thực hiện + tác động","evidence":["mốc thời gian"]}],"actions":[{"text":"việc cần làm cụ thể, bắt đầu bằng động từ","owner":"người phụ trách hoặc Chưa xác định","due":"thời hạn hoặc Chưa xác định","evidence":["mốc thời gian"]}],"risks":[{"text":"rủi ro hoặc vướng mắc","impact":"hậu quả nếu không xử lý + đề xuất giảm thiểu","evidence":["mốc thời gian"]}]}';
+
+// Vai phân tích: tổng hợp theo vấn đề, không tường thuật nguyên văn (yêu cầu người dùng 2026-07-19)
+const ANALYST_SYSTEM = 'Bạn là chuyên gia phân tích cuộc họp cho ban giám đốc dự án xây dựng/nội thất. Nhiệm vụ của bạn là PHÂN TÍCH và TỔNG HỢP theo từng vấn đề, tuyệt đối không tường thuật theo trình tự lời nói, không chép nguyên văn câu nói vào biên bản. Cách làm: gom các trao đổi rời rạc về cùng một vấn đề lại; nêu bản chất và nguyên nhân; phân biệt rõ điều ĐÃ CHỐT với điều CÒN TRANH LUẬN; đánh giá tác động tới tiến độ/chi phí/chất lượng; chủ động suy luận hợp lý từ ngữ cảnh (ai phụ trách, hạn nào, mức độ ưu tiên) — nhưng mỗi kết luận phải gắn 1-3 mốc thời gian evidence sao chép nguyên văn từ transcript; chỗ nào dữ kiện không đủ thì ghi "cần xác minh" thay vì bịa. Viết tiếng Việt. Trả về duy nhất JSON hợp lệ.';
 
 async function chatJson(message, systemText, userText) {
   const body = JSON.stringify({
@@ -548,7 +551,7 @@ Trả về duy nhất JSON theo cấu trúc: ${NOTES_SCHEMA}
 
 ${sourceLabel}:
 ${sourceText}`;
-    const notes = normalizeNotes(await chatJson(message, 'Bạn là thư ký cuộc họp chuyên nghiệp. Viết tiếng Việt, chính xác, đầy đủ và không suy diễn. Trả về JSON.', prompt), message.filename);
+    const notes = normalizeNotes(await chatJson(message, ANALYST_SYSTEM, prompt), message.filename);
     const validated = validateNotes(notes, transcript, { totalChunks, processedChunks: totalChunks, warnings });
     progress('llm-run', 100, 'Biên bản đã hoàn tất.');
     self.postMessage({ type: 'result', notes: validated, fallback: false, usage: { ...usageTotals } });
@@ -806,7 +809,7 @@ Trả về duy nhất JSON hợp lệ theo cấu trúc: ${NOTES_SCHEMA_MM}
 
 ${sourceLabel}:
 ${sourceText}`;
-    const parsed = extractJson(await claudeMessages(message, 'Bạn là thư ký cuộc họp chuyên nghiệp. Viết tiếng Việt, chính xác, đầy đủ và không suy diễn. Trả về duy nhất JSON hợp lệ.', prompt, 8192));
+    const parsed = extractJson(await claudeMessages(message, ANALYST_SYSTEM, prompt, 8192));
     const notes = normalizeNotes(parsed, message.filename);
     notes.mindmap = typeof parsed.mindmap === 'string' ? parsed.mindmap.trim() : '';
     const validated = validateNotes(notes, transcript, { totalChunks, processedChunks: totalChunks, warnings });

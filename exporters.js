@@ -28,7 +28,8 @@ function zipStore(files) {
     const local = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(nameBytes.length), ...u16(0)];
     chunks.push(new Uint8Array(local), nameBytes, data);
     const localLen = local.length + nameBytes.length + data.length;
-    central.push([...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)], nameBytes);
+    // Header + tên phải là MỘT cặp: bug cũ push thành 2 phần tử rời làm central directory toàn số 0 → Word/unzip báo file hỏng
+    central.push([[...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset)], nameBytes]);
     offset += localLen;
   }
   const centralStart = offset;
@@ -105,7 +106,8 @@ export function exportDocx(filename, blocks) {
   triggerDownload(blob, `${filename}.docx`);
 }
 
-// ---------- PDF: cửa sổ in định dạng sạch → lưu PDF thật của trình duyệt ----------
+// ---------- PDF: in qua iframe ẩn → hộp thoại in / lưu PDF của trình duyệt ----------
+// Dùng iframe thay window.open vì iOS ở chế độ PWA (Thêm vào MH chính) chặn cửa sổ mới.
 export function exportPdf(filename, blocks) {
   const html = blocks.map(block => {
     if (block.type === 'h1') return `<h1>${xmlEscape(block.text)}</h1>`;
@@ -115,17 +117,26 @@ export function exportPdf(filename, blocks) {
     if (block.type === 'li') return `<li>${xmlEscape(block.text)}</li>`;
     return `<p>${xmlEscape(block.text)}</p>`;
   }).join('').replace(/(<li>.*?<\/li>)(?!\s*<li>)/gs, '$1</ul>').replace(/(?<!<\/li>\s*)(<li>)/g, '<ul>$1');
-  const win = window.open('', '_blank');
-  if (!win) { alert('Trình duyệt chặn cửa sổ in. Hãy cho phép pop-up rồi thử lại.'); return; }
-  win.document.write(`<!doctype html><html lang="vi"><head><meta charset="utf-8"><title>${xmlEscape(filename)}</title><style>
+  document.getElementById('printFrame')?.remove();
+  const iframe = document.createElement('iframe');
+  iframe.id = 'printFrame';
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentDocument;
+  doc.open();
+  doc.write(`<!doctype html><html lang="vi"><head><meta charset="utf-8"><title>${xmlEscape(filename)}</title><style>
     @page{size:A4;margin:18mm}
     body{font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#111;font-size:12pt;line-height:1.5}
     h1{font-size:22pt;margin:0 0 4pt} h2{font-size:14pt;margin:16pt 0 4pt;border-bottom:1px solid #ccc;padding-bottom:2pt}
     .meta{color:#888;font-size:9pt;margin:0 0 12pt} .gate{padding:6pt 10pt;border-radius:6pt;font-weight:600}
     .gate.ok{background:#e8f5e9;color:#2e7d32} .gate.block{background:#ffebee;color:#c62828}
     ul{margin:4pt 0 8pt;padding-left:18pt} li{margin:2pt 0} p{margin:4pt 0}
-  </style></head><body>${html}<script>window.onload=function(){setTimeout(function(){window.print();},250);};<\/script></body></html>`);
-  win.document.close();
+  </style></head><body>${html}</body></html>`);
+  doc.close();
+  setTimeout(() => {
+    try { iframe.contentWindow.focus(); iframe.contentWindow.print(); }
+    catch { iframe.remove(); alert('Không mở được hộp thoại in trên trình duyệt này.'); }
+  }, 250);
 }
 
 // ---------- CSV (action/risk) ----------

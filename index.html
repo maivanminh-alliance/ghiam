@@ -14,7 +14,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=9.1.0">
+  <link rel="stylesheet" href="styles.css?v=9.1.4">
 </head>
 <body>
   <header class="navbar">
@@ -30,7 +30,6 @@
       <!-- TAB 1: GHI ÂM -->
       <div class="app-tab" id="tabRecord">
         <h1 class="large-title">Ghi âm</h1>
-        <p class="subtitle">Ghi liên tục tới <b>10 giờ</b> hoặc tải file lên. AI phiên âm, tách người nói, viết biên bản và vẽ sơ đồ.</p>
 
         <section class="group record-card" aria-label="Ghi âm trực tiếp">
           <time class="record-timer" id="recordTime">00:00</time>
@@ -42,7 +41,6 @@
             <button class="pill-button" id="markButton" type="button">⚑ Đánh dấu <span id="markCount"></span></button>
             <button class="pill-button" id="blackoutButton" type="button">◐ Màn hình đen</button>
           </div>
-          <p class="record-note">Tự lưu vào máy mỗi 10 phút — văng trang hay hết pin cũng không mất. Android: có thể tắt màn hình bằng nút nguồn, máy vẫn ghi. iPhone: dùng nút "Màn hình đen" (iOS không cho web ghi khi khóa máy) và cắm sạc.</p>
         </section>
 
         <div class="group recovery-banner" id="recoveryBanner" hidden>
@@ -58,7 +56,6 @@
 
         <div class="quick-grid" aria-label="Chức năng nhanh">
           <button type="button" id="qaLibrary"><span class="quick-icon icon-blue"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h5l2 2.5h9v11H4z"/></svg></span><span>Thư viện</span></button>
-          <label class="quick-item"><input id="importInput" type="file" accept="application/json,.json"><span class="quick-icon icon-green"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v10M7.5 11 12 15.5 16.5 11"/><path d="M5 19h14"/></svg></span><span>Nhập JSON</span></label>
           <button type="button" id="qaAsk"><span class="quick-icon icon-purple"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v10H9l-4 3.5V6z"/></svg></span><span>Hỏi AI</span></button>
           <button type="button" id="qaInfo"><span class="quick-icon icon-dark">?</span><span>Trợ giúp</span></button>
         </div>
@@ -83,13 +80,11 @@
         </div>
 
         <button class="primary-button" id="startButton" type="button" disabled>Phân tích bằng AI</button>
-        <p class="group-footer center">Âm thanh gửi trực tiếp từ máy bạn tới Google/Anthropic/OpenAI qua HTTPS, không qua máy chủ trung gian. Chọn bộ máy AI trong tab Cài đặt.</p>
       </div>
 
       <!-- TAB 3: CÀI ĐẶT -->
       <div class="app-tab" id="tabSettings" hidden>
         <h1 class="large-title">Cài đặt</h1>
-        <p class="subtitle">Chọn bộ máy AI, công ty và tùy chọn tạo biên bản.</p>
 
         <p class="group-header">KẾT NỐI AI <span class="badge" id="apiBadge">THIẾU KEY</span></p>
         <section class="group" id="apiSettings">
@@ -103,7 +98,7 @@
           <label class="row" id="rowSummaryModel" hidden><span class="row-label">Viết biên bản</span><span class="row-select"><select id="summaryModelSelect"><option value="gpt-5.4-mini" selected>GPT-5.4 mini</option><option value="gpt-5.4-nano">GPT-5.4 nano</option><option value="gpt-5-mini">GPT-5 mini</option></select><span class="chevron">⌄</span></span></label>
         </section>
         <p class="group-footer" id="orgHint">Công ty Alliance: quản lý dự án, công trường, kỹ thuật, tiến độ, vật tư và nhà thầu.</p>
-        <p class="group-footer">Backend công ty: audio gửi tới Worker riêng (không cần API key trong máy) — phiên âm + tách người nói bằng gpt-4o-transcribe-diarize, bạn tự sửa tên người nói, rồi gpt-5.6-sol lập biên bản. Gemini/OpenAI là lựa chọn khác cần key riêng: Gemini tại <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>, Claude tại <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>, OpenAI tại <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a>. Key chỉ lưu trong máy này.</p>
+        <p class="group-footer">Lấy key: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Gemini</a> · <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Claude</a> · <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI</a> — key chỉ lưu trong máy này.</p>
         <div class="group device-card"><div class="row"><span class="row-icon icon-dark">◈</span><span class="row-body"><b id="deviceTitle">Chưa kết nối OpenAI</b><small id="deviceCopy">Dán API key vào ô bên trên.</small></span></div></div>
 
         <p class="group-header">TÙY CHỌN BIÊN BẢN</p>
@@ -114,7 +109,6 @@
           <label class="row row-stack"><span class="row-label">Ghi chú định hướng</span><textarea id="contextInput" rows="2" placeholder="Ví dụ: tập trung vào tiến độ, rủi ro và trách nhiệm từng bộ phận"></textarea></label>
           <label class="row row-button"><input id="imageInput" type="file" accept="image/*" multiple><span class="row-label link">＋ Ảnh / tài liệu tham chiếu</span><span class="row-value" id="imageCount">Chưa có ảnh</span></label>
         </section>
-        <p class="group-footer">Từ vựng riêng giúp AI viết đúng tên người, tên dự án. Ghi chú định hướng cho AI biết cần tập trung vào nội dung nào.</p>
       </div>
 
       <!-- TAB 2: BIÊN BẢN (trạng thái rỗng) -->
@@ -123,7 +117,6 @@
         <div class="empty-state">
           <span class="empty-icon"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M9 11h7M9 15h7"/></svg></span>
           <h3>Chưa có biên bản</h3>
-          <p>Ghi âm hoặc chọn file rồi bấm Phân tích, hoặc mở lại biên bản đã lưu.</p>
           <button class="primary-button compact" id="notesEmptyRecord" type="button">● Ghi âm ngay</button>
           <button class="pill-button" id="notesEmptyLibrary" type="button">Mở thư viện</button>
         </div>
@@ -155,9 +148,8 @@
 
     <section id="speakerView" hidden>
       <h1 class="large-title">Xác nhận người nói</h1>
-      <p class="subtitle">Backend đã phiên âm và tách giọng thành các nhãn. Đặt tên thật cho từng người trước khi lập biên bản — chưa phân tích ở bước này. Có thể để trống nếu không rõ.</p>
+      <p class="subtitle">Đặt tên thật cho từng người (để trống nếu không rõ).</p>
       <section class="group" id="speakerList"></section>
-      <p class="group-footer">Không lưu mẫu giọng, không tạo voiceprint. Tên chỉ áp dụng cho cuộc họp này.</p>
       <button class="primary-button" id="confirmSpeakersButton" type="button">Xác nhận người nói &amp; phân tích →</button>
       <button class="pill-button" id="cancelSpeakersButton" type="button" style="margin:12px 16px 0">Hủy, chọn file khác</button>
     </section>
@@ -250,7 +242,7 @@
   </dialog>
 
   <dialog id="exportDialog">
-    <div class="dialog-head"><div><h2>Chia sẻ &amp; xuất</h2><p>Chọn định dạng phù hợp.</p></div><button type="button" data-close-dialog aria-label="Đóng">✕</button></div>
+    <div class="dialog-head"><div><h2>Chia sẻ &amp; xuất</h2></div><button type="button" data-close-dialog aria-label="Đóng">✕</button></div>
     <div class="dialog-body">
       <label class="row" style="padding:0 0 12px"><span class="row-label">Chế độ</span><span class="row-select"><select id="exportMode"><option value="full" selected>Full Minutes</option><option value="executive">Executive Brief</option><option value="shareable">Shareable (ẩn mật)</option></select><span class="chevron">⌄</span></span></label>
       <p class="export-note" id="exportModeNote">Chưa phê duyệt: file có watermark "BẢN NHÁP AI".</p>
@@ -270,8 +262,11 @@
   </dialog>
 
   <dialog id="libraryDialog">
-    <div class="dialog-head"><div><h2>Thư viện</h2><p>Biên bản lưu cục bộ trên máy này.</p></div><button type="button" data-close-dialog aria-label="Đóng">✕</button></div>
-    <div class="dialog-body"><div class="library-list" id="libraryList"></div></div>
+    <div class="dialog-head"><div><h2>Thư viện</h2></div><button type="button" data-close-dialog aria-label="Đóng">✕</button></div>
+    <div class="dialog-body">
+      <div class="library-list" id="libraryList"></div>
+      <label class="import-label"><input id="importInput" type="file" accept="application/json,.json">Khôi phục biên bản từ file sao lưu (.json)</label>
+    </div>
   </dialog>
 
   <div id="blackout" hidden>
@@ -280,6 +275,6 @@
     <p>Đang ghi âm — chạm 2 lần để quay lại</p>
   </div>
 
-  <script type="module" src="app.js?v=9.1.0"></script>
+  <script type="module" src="app.js?v=9.1.4"></script>
 </body>
 </html>

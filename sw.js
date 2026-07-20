@@ -1,5 +1,5 @@
-const CACHE = 'meetingmind-v17';
-const SHELL = ['./', './index.html', './styles.css?v=9.1.0', './app.js?v=9.1.0', './ai-worker.js?v=9.1.0', './guardrails.js?v=9.1.0', './exporters.js?v=9.1.0', './enterprise-flow.js?v=9.1.0', './15_ASR_ANOMALY_RULES.json?v=9.1.0', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-512.png'];
+const CACHE = 'meetingmind-v21';
+const SHELL = ['./', './index.html', './styles.css?v=9.1.4', './app.js?v=9.1.4', './ai-worker.js?v=9.1.4', './guardrails.js?v=9.1.4', './exporters.js?v=9.1.4', './enterprise-flow.js?v=9.1.4', './15_ASR_ANOMALY_RULES.json?v=9.1.4', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-512.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', event => {
